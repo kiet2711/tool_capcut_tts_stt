@@ -1,0 +1,5 @@
+{
+    "val_min_video": "0.7",
+    "val_max_video": "1.3",
+    "val_max_audio": "1.3"
+}
