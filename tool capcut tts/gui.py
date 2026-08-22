@@ -1247,6 +1247,7 @@ class CapCutTTSApp(ctk.CTk):
                     for future in concurrent.futures.as_completed(future_to_chunk):
                         chunk_text = future_to_chunk[future]
                         if self.is_cancelled:
+                            executor.shutdown(wait=False, cancel_futures=True)
                             raise Exception("Đã huỷ bởi người dùng.")
                         try:
                             future.result() # raises exception if any
@@ -1419,35 +1420,25 @@ class CapCutTTSApp(ctk.CTk):
                 
                 local_client = CapCutClient(device=self.client.device)
                 
-                if voice_type.startswith("vi-VN-"):
-                    rate_str = format_edge_tts_rate(float(rate))
-                    self.after(0, lambda: self.label_status.configure(text=f"Câu {i+1} đang tổng hợp bằng Edge TTS...", text_color="orange"))
-                    generate_edge_tts_sync(text, voice_type, rate_str, save_path, cancel_check=lambda: self.is_cancelled)
-                else:
-                    def safe_generate_speech(t_text, t_voice, t_rate):
-                        for attempt in range(6):
-                            try:
-                                def on_status(status):
-                                    if self.is_cancelled:
-                                        return False
-                                    if status not in ("success", "succeed"):
-                                        self.after(0, lambda s=status: self.label_status.configure(text=f"Câu {i+1} đang nằm trong hàng đợi CapCut ({s})...", text_color="orange"))
-                                return local_client.generate_speech(texts=t_text, voice=t_voice, rate=t_rate, wait=True, status_callback=on_status)
-                            except Exception as e:
-                                if self.is_cancelled:
-                                    raise e
-                                if attempt == 5:
-                                    raise e
-                                self.after(0, lambda a=attempt: self.label_status.configure(text=f"API chặn. Nghỉ {5*(a+1)}s và thử lại ({a+1}/5)...", text_color="orange"))
-                                for _ in range(5 * (attempt + 1) * 10):
-                                    if self.is_cancelled:
-                                        raise Exception("Đã huỷ bởi người dùng.")
-                                    time.sleep(0.1)
-                                with lock:
-                                    self.client.device.randomize()
-    
-                    result = safe_generate_speech(text, voice_type, rate)
-                    self.download_audio_from_api(result, save_path)
+                try:
+                    if voice_type.startswith("vi-VN-"):
+                        rate_str = format_edge_tts_rate(float(rate))
+                        self.after(0, lambda: self.label_status.configure(text=f"Câu {i+1} đang tổng hợp bằng Edge TTS...", text_color="orange"))
+                        generate_edge_tts_sync(text, voice_type, rate_str, save_path, cancel_check=lambda: self.is_cancelled)
+                    else:
+                        def on_status(status):
+                            if self.is_cancelled:
+                                return False
+                            if status not in ("success", "succeed"):
+                                self.after(0, lambda s=status: self.label_status.configure(text=f"Câu {i+1} đang chờ CapCut ({s})...", text_color="orange"))
+                        
+                        result = local_client.generate_speech(texts=text, voice=voice_type, rate=rate, wait=True, status_callback=on_status)
+                        self.download_audio_from_api(result, save_path)
+                except Exception as e:
+                    if self.is_cancelled:
+                        return None
+                    # Fallback or record failed sentence
+                    return None
                 
                 try:
                     audio = MP3(save_path)
@@ -1472,14 +1463,21 @@ class CapCutTTSApp(ctk.CTk):
                             applied_speedup = required_speedup
                             
                         new_rate = str(round(float(rate) * applied_speedup, 1))
-                        result = safe_generate_speech(text, voice_type, new_rate)
-                        self.download_audio_from_api(result, save_path)
-                        
-                        audio = MP3(save_path)
-                        audio_duration_micros = int(audio.info.length * 1000000)
-                        video_speed = original_duration_micros / audio_duration_micros if audio_duration_micros > 0 else 1.0
-                        if video_speed < min_vid_spd:
-                            video_speed = min_vid_spd
+                        try:
+                            if voice_type.startswith("vi-VN-"):
+                                new_rate_str = format_edge_tts_rate(float(new_rate))
+                                generate_edge_tts_sync(text, voice_type, new_rate_str, save_path, cancel_check=lambda: self.is_cancelled)
+                            else:
+                                result = local_client.generate_speech(texts=text, voice=voice_type, rate=new_rate, wait=True)
+                                self.download_audio_from_api(result, save_path)
+                            
+                            audio = MP3(save_path)
+                            audio_duration_micros = int(audio.info.length * 1000000)
+                            video_speed = original_duration_micros / audio_duration_micros if audio_duration_micros > 0 else 1.0
+                            if video_speed < min_vid_spd:
+                                video_speed = min_vid_spd
+                        except Exception:
+                            pass
                             
                     elif video_speed > max_vid_spd:
                         video_speed = max_vid_spd
@@ -1533,14 +1531,114 @@ class CapCutTTSApp(ctk.CTk):
                     if self.is_cancelled:
                         executor.shutdown(wait=False, cancel_futures=True)
                         raise Exception("Đã dừng xử lý theo yêu cầu.")
-                    res = future.result() # Will raise exception if thread failed
-                    if res is not None:
-                        audio_info_list.append(res)
+                    try:
+                        res = future.result()
+                        if res is not None:
+                            audio_info_list.append(res)
+                    except Exception:
+                        pass
                         
-            # Sort by original index to keep chronological order
-            audio_info_list.sort(key=lambda x: x["index"])
+            if self.is_cancelled:
+                return
 
-            reports = [info["report_item"] for info in audio_info_list if info.get("report_item")]
+            # Check for missing/failed audio files
+            missing_indices = []
+            missing_subs = pysrt.SubRipFile()
+            for i, sub in enumerate(subs):
+                audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
+                if not os.path.exists(audio_path):
+                    missing_indices.append(i)
+                    missing_subs.append(sub)
+                else:
+                    try:
+                        audio = MP3(audio_path)
+                        if audio.info.length <= 0:
+                            missing_indices.append(i)
+                            missing_subs.append(sub)
+                    except Exception:
+                        missing_indices.append(i)
+                        missing_subs.append(sub)
+
+            missing_srt_path = os.path.join(proj_dir, "missing_subs.srt")
+            if missing_indices:
+                missing_subs.save(missing_srt_path, encoding='utf-8')
+                ans = [None]
+                event = threading.Event()
+                def ask():
+                    ans[0] = messagebox.askyesno(
+                        "Có câu TTS bị lỗi",
+                        f"Có {len(missing_indices)}/{total} câu không thể tạo giọng đọc (do từ cấm hoặc mạng).\n"
+                        f"Danh sách câu lỗi đã lưu tại:\n{missing_srt_path}\n\n"
+                        "Bạn có muốn BỎ QUA các câu lỗi này và tiếp tục ghép vào CapCut không?\n\n"
+                        "- Chọn YES: Tiếp tục ghép vào CapCut (các đoạn lỗi sẽ không có tiếng).\n"
+                        "- Chọn NO: Dừng lại để bạn chỉnh sửa missing_subs.srt và dùng Tab 'Ghép Audio có sẵn' -> 'Tải bù audio'."
+                    )
+                    event.set()
+                self.after(0, ask)
+                event.wait()
+                if not ans[0]:
+                    self.after(0, lambda: self.label_status.configure(text=f"Đã dừng. Danh sách câu lỗi lưu tại missing_subs.srt", text_color="orange"))
+                    return
+            else:
+                if os.path.exists(missing_srt_path):
+                    try:
+                        os.remove(missing_srt_path)
+                    except Exception:
+                        pass
+
+            # Build full audio info list ensuring all segments are represented
+            final_audio_info = []
+            audio_map = {item["index"]: item for item in audio_info_list}
+            for i, sub in enumerate(subs):
+                text = sub.text.replace("\n", " ").strip()
+                if not text:
+                    continue
+                start_micros = sub.start.ordinal * 1000
+                end_micros = sub.end.ordinal * 1000
+                original_duration_micros = end_micros - start_micros
+                audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
+                
+                if i in audio_map:
+                    final_audio_info.append(audio_map[i])
+                elif os.path.exists(audio_path):
+                    try:
+                        audio = MP3(audio_path)
+                        dur = int(audio.info.length * 1000000)
+                        final_audio_info.append({
+                            "index": i,
+                            "path": audio_path,
+                            "start": start_micros,
+                            "end": end_micros,
+                            "duration": dur,
+                            "video_speed": 1.0,
+                            "report_item": None,
+                        })
+                    except Exception:
+                        final_audio_info.append({
+                            "index": i,
+                            "path": "",
+                            "start": start_micros,
+                            "end": end_micros,
+                            "duration": original_duration_micros,
+                            "video_speed": 1.0,
+                            "report_item": None,
+                            "is_dummy": True,
+                        })
+                else:
+                    final_audio_info.append({
+                        "index": i,
+                        "path": "",
+                        "start": start_micros,
+                        "end": end_micros,
+                        "duration": original_duration_micros,
+                        "video_speed": 1.0,
+                        "report_item": None,
+                        "is_dummy": True,
+                    })
+
+            final_audio_info.sort(key=lambda x: x["index"])
+
+            reports = [info["report_item"] for info in final_audio_info if info.get("report_item")]
             if reports:
                 report_path = os.path.join(proj_dir, "overlap_report.json")
                 with open(report_path, "w", encoding="utf-8") as f:
@@ -1554,17 +1652,13 @@ class CapCutTTSApp(ctk.CTk):
             else:
                 self.after(0, lambda: self.label_status.configure(text="Đang chèn âm thanh vào dự án CapCut..."))
                 
-            modify_capcut_project(json_file, audio_info_list, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_speed)
+            modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_speed)
             
             self.after(0, lambda: self.label_status.configure(text="Hoàn tất!", text_color="green"))
             
-            if sync_mode == "Khớp từng câu (Anti-Overlap)":
-                msg = f"Đã chia nhỏ video và chèn {len(audio_info_list)} âm thanh thành công!\nVui lòng tải lại dự án trên CapCut."
-            elif sync_mode == "Đổi tốc độ toàn bộ (Fixed Speed)":
-                msg = f"Đã thay đổi tốc độ video/audio và chèn {len(audio_info_list)} âm thanh thành công!\nVui lòng tải lại dự án trên CapCut."
-            else:
-                msg = f"Đã chèn {len(audio_info_list)} âm thanh thành công!\nVui lòng tải lại dự án trên CapCut."
-                
+            msg = f"Đã chèn âm thanh thành công!\nVui lòng tải lại dự án trên CapCut."
+            if missing_indices:
+                msg += f"\n\n(Đã bỏ qua {len(missing_indices)} câu lỗi không có âm thanh)"
             if reports:
                 msg += f"\n\nLưu ý: Có {len(reports)} câu dịch quá dài không thể ép vừa khớp tốc độ. Đã lưu báo cáo tại overlap_report.json"
             self.after(0, lambda m=msg: messagebox.showinfo("Thành công", m))
@@ -1690,40 +1784,23 @@ class CapCutTTSApp(ctk.CTk):
                         return True
                     audio_path = os.path.join(audio_dir, f"audio_{idx+1:04d}.mp3")
                     
-                    if voice_type.startswith("vi-VN-"):
-                        try:
+                    try:
+                        if voice_type.startswith("vi-VN-"):
                             rate_str = format_edge_tts_rate(float(rate))
                             self.after(0, lambda: self.label_status.configure(text=f"Câu {idx+1} tải bù đang tổng hợp bằng Edge TTS...", text_color="orange"))
                             generate_edge_tts_sync(text, voice_type, rate_str, audio_path, cancel_check=lambda: self.is_cancelled)
                             return True
-                        except Exception:
-                            return False
-                    else:
-                        def safe_generate_speech(t_text, t_voice, t_rate):
-                            for attempt in range(6):
-                                try:
-                                    def on_status(status):
-                                        if status not in ("success", "succeed"):
-                                            self.after(0, lambda s=status: self.label_status.configure(text=f"Câu {idx+1} tải bù đang chờ CapCut ({s})...", text_color="orange"))
-                                    return self.client.generate_speech(texts=t_text, voice=t_voice, rate=t_rate, wait=True, status_callback=on_status)
-                                except Exception as e:
-                                    if attempt == 5:
-                                        return None
-                                    self.after(0, lambda a=attempt: self.label_status.configure(text=f"API chặn khi tải bù. Nghỉ {5*(a+1)}s và thử lại...", text_color="orange"))
-                                    for _ in range(5 * (attempt + 1) * 10):
-                                        if self.is_cancelled:
-                                            return None
-                                        time.sleep(0.1)
-                                    with lock:
-                                        self.client.device.randomize()
-                                    
-                        result = safe_generate_speech(text, voice_type, rate)
-                        if result:
-                            try:
-                                self.download_audio_from_api(result, audio_path)
-                                return True
-                            except Exception:
-                                return False
+                        else:
+                            def on_status(status):
+                                if self.is_cancelled:
+                                    return False
+                                if status not in ("success", "succeed"):
+                                    self.after(0, lambda s=status: self.label_status.configure(text=f"Câu {idx+1} tải bù đang chờ CapCut ({s})...", text_color="orange"))
+                            
+                            result = self.client.generate_speech(texts=text, voice=voice_type, rate=rate, wait=True, status_callback=on_status)
+                            self.download_audio_from_api(result, audio_path)
+                            return True
+                    except Exception:
                         return False
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:

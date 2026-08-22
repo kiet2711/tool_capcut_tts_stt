@@ -336,12 +336,12 @@ class CapCutClient:
         rate: str = "1.0",
     ) -> Dict[str, Any]:
         """
-        Submit a new Text-to-Speech task to CapCut API.
+        Submit a new Text-to-Speech (TTS) synthesis task to CapCut.
         """
         if self.session is None:
             raise CapCutError("The 'requests' package is required. Run 'pip install requests'.")
         url, headers, body_text = self.build_tts_new_request(texts, voice, resource_id, rate)
-        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=60)
+        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=15)
         return _checked_json_response(resp, "create_tts_task")
 
     def query_tts_task(
@@ -355,7 +355,7 @@ class CapCutClient:
         url, headers, body_text = self.build_query_request(
             task_id, token, mode="tts", bind_id=bind_id
         )
-        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=60)
+        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=15)
         return _checked_json_response(resp, "query_tts_task")
 
     def generate_speech(
@@ -365,44 +365,60 @@ class CapCutClient:
         resource_id: Optional[str] = None,
         rate: str = "1.0",
         wait: bool = True,
-        poll_interval: float = 1.0,
-        timeout: float = 900.0,
+        poll_interval: float = 0.5,
+        timeout: float = 15.0,
+        max_retries: int = 3,
         status_callback: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """
         Convenience method: Submits TTS task and polls until completed.
+        Includes fast timeout, automatic device rotation and retries.
         """
-        create_res = self.create_tts_task(texts, voice, resource_id, rate)
-        if not wait:
-            return create_res
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                create_res = self.create_tts_task(texts, voice, resource_id, rate)
+                if not wait:
+                    return create_res
 
-        tasks = (create_res.get("data") or {}).get("tasks") or []
-        if not tasks:
-            raise CapCutTaskError(f"No task returned from API: {create_res}")
+                tasks = (create_res.get("data") or {}).get("tasks") or []
+                if not tasks:
+                    raise CapCutTaskError(f"No task returned from API: {create_res}")
 
-        task_id = tasks[0]["id"]
-        token = tasks[0]["token"]
+                task_id = tasks[0]["id"]
+                token = tasks[0]["token"]
 
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            query_res = self.query_tts_task(task_id, token)
-            query_tasks = (query_res.get("data") or {}).get("tasks") or []
-            if query_tasks:
-                status = query_tasks[0].get("status")
-                if status_callback:
-                    if status_callback(status) is False:
-                        raise CapCutTaskError("Đã huỷ bởi người dùng.")
-                if status in ("success", "succeed"):
-                    return query_res
-                elif status == "failed":
-                    raise CapCutTaskError(f"TTS Task failed: {query_res}")
-            else:
-                msg = query_res.get("message") or str(query_res)
-                if status_callback:
-                    status_callback(f"Lỗi truy vấn: {msg}")
-            time.sleep(poll_interval)
+                start_time = time.time()
+                while time.time() - start_time < timeout:
+                    query_res = self.query_tts_task(task_id, token)
+                    query_tasks = (query_res.get("data") or {}).get("tasks") or []
+                    if query_tasks:
+                        task_item = query_tasks[0]
+                        status = task_item.get("status")
+                        if status_callback:
+                            if status_callback(status) is False:
+                                raise CapCutTaskError("Đã huỷ bởi người dùng.")
+                        if status in ("success", "succeed"):
+                            return query_res
+                        elif status == "failed":
+                            err_msg = query_res.get("message") or task_item.get("message") or "CapCut rejected text"
+                            raise CapCutTaskError(f"TTS Task failed: {err_msg}")
+                    else:
+                        msg = query_res.get("message") or str(query_res)
+                        if status_callback:
+                            status_callback(f"Lỗi truy vấn: {msg}")
+                    time.sleep(poll_interval)
 
-        raise CapCutTaskError(f"TTS Task timed out after {timeout} seconds")
+                raise CapCutTaskError(f"TTS Task timed out after {timeout} seconds")
+            except Exception as exc:
+                last_exc = exc
+                if "Đã huỷ bởi người dùng" in str(exc):
+                    raise exc
+                # Randomize device and retry
+                self.device.randomize()
+                time.sleep(0.8 * (attempt + 1))
+
+        raise CapCutError(f"Failed to generate speech after {max_retries} attempts: {last_exc}")
 
     def upload_audio(self, file_path: Union[str, Path]) -> UploadResult:
         """
