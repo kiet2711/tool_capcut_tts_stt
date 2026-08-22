@@ -366,7 +366,8 @@ class CapCutClient:
         rate: str = "1.0",
         wait: bool = True,
         poll_interval: float = 1.0,
-        timeout: float = 60.0,
+        timeout: float = 900.0,
+        status_callback: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """
         Convenience method: Submits TTS task and polls until completed.
@@ -388,10 +389,17 @@ class CapCutClient:
             query_tasks = (query_res.get("data") or {}).get("tasks") or []
             if query_tasks:
                 status = query_tasks[0].get("status")
+                if status_callback:
+                    if status_callback(status) is False:
+                        raise CapCutTaskError("Đã huỷ bởi người dùng.")
                 if status in ("success", "succeed"):
                     return query_res
                 elif status == "failed":
                     raise CapCutTaskError(f"TTS Task failed: {query_res}")
+            else:
+                msg = query_res.get("message") or str(query_res)
+                if status_callback:
+                    status_callback(f"Lỗi truy vấn: {msg}")
             time.sleep(poll_interval)
 
         raise CapCutTaskError(f"TTS Task timed out after {timeout} seconds")
@@ -445,7 +453,7 @@ class CapCutClient:
         use_translation: bool = False,
         wait: bool = True,
         poll_interval: float = 2.0,
-        timeout: float = 120.0,
+        timeout: float = 900.0,
     ) -> Dict[str, Any]:
         """
         Upload media file, create STT task, and optionally poll for completion.

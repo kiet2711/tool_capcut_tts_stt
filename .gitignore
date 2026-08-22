@@ -67,3 +67,11 @@ venv.bak/
 # OS generated
 .DS_Store
 Thumbs.db
+*.lnk
+
+# Local / Temp files
+temp.txt
+temp_preview_bg.jpg
+draft_content.json
+voice_samples/
+review_giong_doc.html

@@ -14,7 +14,8 @@ authors = [
 ]
 keywords = ["capcut", "capcut-tts-api", "tts", "stt", "speech-to-text", "text-to-speech", "vod", "api"]
 dependencies = [
-    "requests>=2.25.0"
+    "requests>=2.25.0",
+    "edge-tts>=6.1.13"
 ]
 
 [project.scripts]
