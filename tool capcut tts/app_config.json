@@ -6,7 +6,6 @@
     "val_rest_blocks": "300",
     "val_id_blocks": "300",
     "sync_mode": "Khớp từng câu (Anti-Overlap)",
-    "merge_sync_mode": "Khớp từng câu (dùng cấu hình Tab 2)",
     "fixed_vid_speed": "0.5",
     "fixed_aud_speed": "1.0",
     "adv_vid_vol": "-20",

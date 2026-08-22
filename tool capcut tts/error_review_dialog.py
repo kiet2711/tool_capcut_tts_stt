@@ -574,8 +574,7 @@ class TTSErrorReviewDialog(ctk.CTkToplevel):
         """Người dùng đóng cửa sổ hoặc bấm Dừng lại."""
         ans = messagebox.askyesno(
             "Đóng cửa sổ",
-            "Bạn có chắc muốn đóng cửa sổ và DỪNG tiến trình xử lý không?\n"
-            "(Danh sách các câu chưa tạo sẽ được lưu vào file missing_subs.srt)",
+            "Bạn có chắc muốn đóng cửa sổ không?\n\n(Bạn có thể bấm nút '⚠️ Mở Bảng Xử Lý Câu Lỗi' trên giao diện chính bất kỳ lúc nào để mở lại và sửa tiếp)",
             parent=self
         )
         if not ans:

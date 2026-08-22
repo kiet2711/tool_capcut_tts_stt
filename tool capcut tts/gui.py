@@ -514,7 +514,6 @@ class CapCutTTSApp(ctk.CTk):
         self.tabview.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
         self.tab_basic = self.tabview.add("Tạo TTS Cơ Bản")
         self.tab_srt = self.tabview.add("Chèn SRT vào CapCut")
-        self.tab_merge = self.tabview.add("Ghép Audio Có Sẵn")
         self.tab_split = self.tabview.add("Chia Nhỏ Project")
         self.tab_stt = self.tabview.add("Nhận diện (STT)")
         
@@ -591,44 +590,18 @@ class CapCutTTSApp(ctk.CTk):
         
         ctk.CTkButton(self.frame_sync_opts, text="Reset về mặc định", width=80, fg_color="#b23b3b", hover_color="#8f2b2b", command=self.reset_sync_config).grid(row=0, column=6, padx=5, pady=5, sticky="ns")
         
-        self.btn_generate_srt = ctk.CTkButton(self.tab_srt, text="Bắt đầu xử lý SRT", font=ctk.CTkFont(size=16, weight="bold"), height=45, command=self.on_generate_srt)
-        self.btn_generate_srt.grid(row=6, column=0, columnspan=3, padx=10, pady=20, sticky="ew")
+        self.frame_tab_srt_btns = ctk.CTkFrame(self.tab_srt, fg_color="transparent")
+        self.frame_tab_srt_btns.grid(row=6, column=0, columnspan=3, padx=10, pady=20, sticky="ew")
+        self.frame_tab_srt_btns.grid_columnconfigure(0, weight=3)
+        self.frame_tab_srt_btns.grid_columnconfigure(1, weight=2)
 
-        # -- Tab 3: Merge Existing Audio --
-        self.tab_merge.grid_columnconfigure(1, weight=1)
-        
-        self.merge_srt_path = ctk.StringVar()
-        ctk.CTkLabel(self.tab_merge, text="File SRT:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkEntry(self.tab_merge, textvariable=self.merge_srt_path, state="disabled").grid(row=0, column=1, padx=10, pady=10, sticky="ew")
-        ctk.CTkButton(self.tab_merge, text="Chọn", width=60, command=self.select_merge_srt).grid(row=0, column=2, padx=10, pady=10)
-        
-        self.merge_json_path = ctk.StringVar()
-        ctk.CTkLabel(self.tab_merge, text="Dự án CapCut (JSON):").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkEntry(self.tab_merge, textvariable=self.merge_json_path, state="disabled").grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-        ctk.CTkButton(self.tab_merge, text="Chọn", width=60, command=self.select_merge_json).grid(row=1, column=2, padx=10, pady=10)
+        self.btn_generate_srt = ctk.CTkButton(self.frame_tab_srt_btns, text="Bắt đầu xử lý SRT", font=ctk.CTkFont(size=16, weight="bold"), height=45, command=self.on_generate_srt)
+        self.btn_generate_srt.grid(row=0, column=0, padx=(0, 10), sticky="ew")
 
-        self.merge_audio_path = ctk.StringVar()
-        ctk.CTkLabel(self.tab_merge, text="Thư mục Audio (mp3):").grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkEntry(self.tab_merge, textvariable=self.merge_audio_path, state="disabled").grid(row=2, column=1, padx=10, pady=10, sticky="ew")
-        ctk.CTkButton(self.tab_merge, text="Chọn", width=60, command=self.select_merge_audio).grid(row=2, column=2, padx=10, pady=10)
-        
-        self.merge_progressbar = ctk.CTkProgressBar(self.tab_merge)
-        self.merge_progressbar.grid(row=3, column=0, columnspan=3, padx=10, pady=(20, 5), sticky="ew")
-        self.merge_progressbar.set(0)
-        
-        self.merge_label_progress = ctk.CTkLabel(self.tab_merge, text="Tiến độ: 0 / 0 câu")
-        self.merge_label_progress.grid(row=4, column=0, columnspan=3, padx=10, pady=5)
-        
-        ctk.CTkLabel(self.tab_merge, text="Chế độ đồng bộ:").grid(row=5, column=0, padx=10, pady=5, sticky="w")
-        self.combo_merge_sync_mode_var = ctk.StringVar(value="Khớp từng câu (dùng cấu hình Tab 2)")
-        self.combo_merge_sync_mode_var.trace_add("write", lambda *args: self.save_sync_config(silent=True))
-        self.combo_merge_sync_mode = ctk.CTkComboBox(self.tab_merge, values=["Không đồng bộ", "Khớp từng câu (dùng cấu hình Tab 2)", "Đổi tốc độ toàn bộ (dùng cấu hình Tab 2)"], variable=self.combo_merge_sync_mode_var, width=350)
-        self.combo_merge_sync_mode.grid(row=5, column=1, columnspan=2, padx=10, pady=5, sticky="w")
-        
-        self.btn_generate_merge = ctk.CTkButton(self.tab_merge, text="Bắt đầu ghép vào CapCut", font=ctk.CTkFont(size=16, weight="bold"), height=45, command=self.on_generate_merge)
-        self.btn_generate_merge.grid(row=6, column=0, columnspan=3, padx=10, pady=20, sticky="ew")
+        self.btn_open_review_tab2 = ctk.CTkButton(self.frame_tab_srt_btns, text="⚠️ Mở Bảng Xử Lý Câu Lỗi", font=ctk.CTkFont(size=14, weight="bold"), fg_color="#b45309", hover_color="#92400e", text_color="#ffffff", height=45, command=self.open_review_dialog_tab2)
+        self.btn_open_review_tab2.grid(row=0, column=1, sticky="ew")
 
-        # -- Tab 4: Split Project --
+        # -- Tab 3: Split Project --
         self.tab_split.grid_columnconfigure(1, weight=1)
         
         self.split_project_path = ctk.StringVar()
@@ -965,7 +938,6 @@ class CapCutTTSApp(ctk.CTk):
                     if "val_rest_blocks" in config: self.val_rest_blocks.set(config["val_rest_blocks"])
                     if "val_id_blocks" in config: self.val_id_blocks.set(config["val_id_blocks"])
                     if "sync_mode" in config: self.combo_sync_mode_var.set(config["sync_mode"])
-                    if "merge_sync_mode" in config: self.combo_merge_sync_mode_var.set(config["merge_sync_mode"])
                     if "fixed_vid_speed" in config: self.val_fixed_vid_speed.set(config["fixed_vid_speed"])
                     if "fixed_aud_speed" in config: self.val_fixed_aud_speed.set(config["fixed_aud_speed"])
                     
@@ -995,7 +967,6 @@ class CapCutTTSApp(ctk.CTk):
                 "val_rest_blocks": self.val_rest_blocks.get(),
                 "val_id_blocks": self.val_id_blocks.get(),
                 "sync_mode": self.combo_sync_mode_var.get(),
-                "merge_sync_mode": self.combo_merge_sync_mode_var.get(),
                 "fixed_vid_speed": self.val_fixed_vid_speed.get(),
                 "fixed_aud_speed": self.val_fixed_aud_speed.get(),
                 "adv_vid_vol": self.val_vid_vol.get(),
@@ -1019,7 +990,6 @@ class CapCutTTSApp(ctk.CTk):
         self.val_max_video.set("1.15")
         self.val_max_audio.set("1.15")
         self.combo_sync_mode_var.set("Khớp từng câu (Anti-Overlap)")
-        self.combo_merge_sync_mode_var.set("Khớp từng câu (dùng cấu hình Tab 2)")
         self.val_fixed_vid_speed.set("1.0")
         self.val_fixed_aud_speed.set("1.0")
         self.toggle_sync_opts()
@@ -1067,7 +1037,12 @@ class CapCutTTSApp(ctk.CTk):
                 
             self.after(0, lambda: self.combo_voice.configure(values=voice_names))
             if voice_names:
-                self.after(0, lambda: self.combo_voice.set(voice_names[0]))
+                default_voice = voice_names[0]
+                for vname in voice_names:
+                    if "cô gái hoạt ngôn" in vname.lower() or "bv074_streaming" in vname.lower():
+                        default_voice = vname
+                        break
+                self.after(0, lambda: self.combo_voice.set(default_voice))
         except Exception as e:
             err_msg = [f"Lỗi: {str(e)[:50]}..."]
             self.after(0, lambda: self.combo_voice.configure(values=err_msg))
@@ -1078,7 +1053,7 @@ class CapCutTTSApp(ctk.CTk):
         try:
             return selected_voice_str.split("(")[-1].strip(")")
         except IndexError:
-            return "BV421_vivn_streaming"
+            return "BV074_streaming"
             
     def get_selected_rate(self):
         return str(round(self.slider_rate.get(), 1))
@@ -1560,7 +1535,6 @@ class CapCutTTSApp(ctk.CTk):
                         missing_indices.append(i)
                         missing_subs.append(sub)
 
-            missing_srt_path = os.path.join(proj_dir, "missing_subs.srt")
             if missing_indices:
                 missing_items = []
                 for i in missing_indices:
@@ -1668,13 +1642,7 @@ class CapCutTTSApp(ctk.CTk):
                 dialog_event.wait()
 
                 if not user_choice[0] or user_choice[0][0] == "cancel":
-                    missing_subs = pysrt.SubRipFile()
-                    for it in missing_items:
-                        if it.get("status") != "success":
-                            missing_subs.append(it["sub"])
-                    if missing_subs:
-                        missing_subs.save(missing_srt_path, encoding='utf-8')
-                    self.after(0, lambda: self.label_status.configure(text=f"Đã dừng. Danh sách câu lỗi lưu tại missing_subs.srt", text_color="orange"))
+                    self.after(0, lambda: self.label_status.configure(text="Đã dừng. Bạn có thể bấm '⚠️ Mở Bảng Xử Lý Câu Lỗi' để mở lại bất kỳ lúc nào.", text_color="orange"))
                     return
 
                 # Proceed
@@ -1682,24 +1650,6 @@ class CapCutTTSApp(ctk.CTk):
                 for res_it in resolved_items:
                     if "result_info" in res_it and res_it["result_info"]:
                         audio_info_list.append(res_it["result_info"])
-
-                if unresolved_items:
-                    rem_subs = pysrt.SubRipFile()
-                    for it in unresolved_items:
-                        rem_subs.append(it["sub"])
-                    rem_subs.save(missing_srt_path, encoding='utf-8')
-                else:
-                    if os.path.exists(missing_srt_path):
-                        try:
-                            os.remove(missing_srt_path)
-                        except Exception:
-                            pass
-            else:
-                if os.path.exists(missing_srt_path):
-                    try:
-                        os.remove(missing_srt_path)
-                    except Exception:
-                        pass
 
             # Build full audio info list ensuring all segments are represented
             final_audio_info = []
@@ -1785,329 +1735,198 @@ class CapCutTTSApp(ctk.CTk):
             self.after(0, lambda: self.btn_generate_srt.configure(state="normal", text="Bắt đầu xử lý SRT"))
             self.after(0, lambda: self.btn_stop.configure(state="disabled"))
 
-
-    # --- MERGE EXISTING AUDIO TAB ---
-    def select_merge_srt(self):
-        path = filedialog.askopenfilename(filetypes=[("SRT Subtitles", "*.srt")])
-        if path:
-            self.merge_srt_path.set(path)
-            
-    def select_merge_json(self):
-        path = filedialog.askdirectory(title="Chọn Thư mục Dự án CapCut")
-        if path:
-            json_path = os.path.join(path, "draft_content.json")
-            if not os.path.exists(json_path):
-                messagebox.showwarning("Cảnh báo", f"Không tìm thấy file draft_content.json trong thư mục này.\nVui lòng chọn đúng thư mục chứa dự án CapCut.")
-            else:
-                self.merge_json_path.set(json_path)
-                audio_dir = os.path.join(path, "tts_audios")
-                if os.path.exists(audio_dir) and not self.merge_audio_path.get():
-                    self.merge_audio_path.set(audio_dir)
-                    
-    def select_merge_audio(self):
-        path = filedialog.askdirectory(title="Chọn Thư mục chứa Audio")
-        if path:
-            self.merge_audio_path.set(path)
-
-    def on_generate_merge(self):
-        srt_file = self.merge_srt_path.get()
-        json_file = self.merge_json_path.get()
-        audio_dir = self.merge_audio_path.get()
+    def open_review_dialog_tab2(self):
+        srt_file = self.srt_path.get()
+        json_file = self.json_path.get()
         
         if not srt_file or not os.path.exists(srt_file):
-            messagebox.showwarning("Lỗi", "Vui lòng chọn file SRT hợp lệ.")
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn file SRT hợp lệ trước.")
             return
         if not json_file or not os.path.exists(json_file):
-            messagebox.showwarning("Lỗi", "Vui lòng chọn file draft_content.json hợp lệ.")
-            return
-        if not audio_dir or not os.path.exists(audio_dir):
-            messagebox.showwarning("Lỗi", "Vui lòng chọn thư mục chứa Audio hợp lệ.")
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn file Dự án CapCut (JSON) trước.")
             return
             
-        sync_mode = self.combo_merge_sync_mode_var.get()
-        min_vid = 0.85
-        max_vid = 1.15
-        fixed_vid_speed = 1.0
-        fixed_aud_speed = 1.0
+        voice_type = self.get_selected_voice()
+        rate = self.get_selected_rate()
+        sync_mode = self.combo_sync_mode_var.get()
         
-        if sync_mode == "Khớp từng câu (dùng cấu hình Tab 2)":
-            try:
-                min_vid = float(self.val_min_video.get())
-                max_vid = float(self.val_max_video.get())
-            except ValueError:
-                messagebox.showwarning("Lỗi", "Vui lòng nhập số hợp lệ cho cấu hình Anti-Overlap ở Tab 2.")
-                return
-        elif sync_mode == "Đổi tốc độ toàn bộ (dùng cấu hình Tab 2)":
-            try:
-                fixed_vid_speed = float(self.val_fixed_vid_speed.get())
-                fixed_aud_speed = float(self.val_fixed_aud_speed.get())
-            except ValueError:
-                messagebox.showwarning("Lỗi", "Vui lòng nhập số hợp lệ cho Tốc độ Video/Audio ở Tab 2.")
-                return
-
-        adv_settings = self.get_adv_settings()
-        self.btn_generate_merge.configure(state="disabled", text="Đang ghép...")
-        self.is_cancelled = False
-        self.btn_stop.configure(state="normal")
-        threading.Thread(target=self.generate_merge_thread, args=(srt_file, json_file, audio_dir, sync_mode, min_vid, max_vid, adv_settings, fixed_vid_speed, fixed_aud_speed), daemon=True).start()
-
-    def generate_merge_thread(self, srt_file, json_file, audio_dir, sync_mode, min_vid_spd, max_vid_spd, adv_settings, fixed_vid_speed, fixed_aud_speed):
         try:
-            voice_type = self.get_selected_voice()
-            rate = self.get_selected_rate()
-            num_threads = int(self.slider_threads.get())
-
-            subs = pysrt.open(srt_file)
-            total = len(subs)
-            if total == 0:
-                raise Exception("File SRT rỗng hoặc không hợp lệ.")
-                
-            self.after(0, lambda: self.merge_progressbar.set(0))
-            self.after(0, lambda: self.merge_label_progress.configure(text=f"Tiến độ: 0 / {total} câu"))
-            self.after(0, lambda: self.label_status.configure(text="Đang phân tích thời lượng Audio offline..."))
-
-            # Phase 1: Scan for missing blocks
-            missing_indices = []
-            for i, sub in enumerate(subs):
-                audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
-                if not os.path.exists(audio_path):
-                    missing_indices.append(i)
-                else:
-                    try:
-                        audio = MP3(audio_path)
-                        _ = audio.info.length
-                    except Exception:
-                        missing_indices.append(i)
+            min_vid = float(self.val_min_video.get())
+            max_vid = float(self.val_max_video.get())
+            max_aud = float(self.val_max_audio.get())
+            fixed_vid_speed = float(self.val_fixed_vid_speed.get())
+            fixed_aud_speed = float(self.val_fixed_aud_speed.get())
+        except:
+            min_vid, max_vid, max_aud = 0.85, 1.15, 1.15
+            fixed_vid_speed, fixed_aud_speed = 1.0, 1.0
             
-            if missing_indices:
-                missing_srt_path = srt_file.replace(".srt", "_missing.srt")
-                missing_subs = pysrt.SubRipFile()
-                for idx in missing_indices:
-                    missing_subs.append(subs[idx])
-                missing_subs.save(missing_srt_path, encoding='utf-8')
-                
-                self.after(0, lambda: self.label_status.configure(text=f"Phát hiện thiếu {len(missing_indices)} câu. Bắt đầu tải bù đa luồng..."))
-                
-                import concurrent.futures
-                lock = threading.Lock()
-                
-                def download_missing(idx):
-                    if self.is_cancelled: return False
-                    sub = subs[idx]
-                    text = sub.text.replace("\n", " ").strip()
-                    if not text:
-                        return True
-                    audio_path = os.path.join(audio_dir, f"audio_{idx+1:04d}.mp3")
+        adv_settings = self.get_adv_settings()
+        
+        try:
+            subs = pysrt.open(srt_file)
+            if len(subs) == 0:
+                messagebox.showwarning("Cảnh báo", "File SRT rỗng.")
+                return
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể đọc file SRT: {e}")
+            return
+            
+        proj_dir = os.path.dirname(json_file)
+        audio_dir = os.path.join(proj_dir, "tts_audios")
+        os.makedirs(audio_dir, exist_ok=True)
+        
+        missing_items = []
+        for i, sub in enumerate(subs):
+            audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
+            start_micros = sub.start.ordinal * 1000
+            end_micros = sub.end.ordinal * 1000
+            orig_dur = end_micros - start_micros
+            sub_id = getattr(sub, 'index', i + 1) or (i + 1)
+            
+            is_missing = True
+            if os.path.exists(audio_path):
+                try:
+                    audio = MP3(audio_path)
+                    if audio.info.length > 0:
+                        is_missing = False
+                except Exception:
+                    pass
                     
-                    try:
-                        if voice_type.startswith("vi-VN-"):
-                            rate_str = format_edge_tts_rate(float(rate))
-                            self.after(0, lambda: self.label_status.configure(text=f"Câu {idx+1} tải bù đang tổng hợp bằng Edge TTS...", text_color="orange"))
-                            generate_edge_tts_sync(text, voice_type, rate_str, audio_path, cancel_check=lambda: self.is_cancelled)
-                            return True
-                        else:
-                            def on_status(status):
-                                if self.is_cancelled:
-                                    return False
-                                if status not in ("success", "succeed"):
-                                    self.after(0, lambda s=status: self.label_status.configure(text=f"Câu {idx+1} tải bù đang chờ CapCut ({s})...", text_color="orange"))
-                            
-                            result = self.client.generate_speech(texts=text, voice=voice_type, rate=rate, wait=True, status_callback=on_status)
-                            self.download_audio_from_api(result, audio_path)
-                            return True
-                    except Exception:
-                        return False
+            if is_missing:
+                missing_items.append({
+                    "index": i,
+                    "sub_index": sub_id,
+                    "text": sub.text.replace("\n", " ").strip(),
+                    "sub": sub,
+                    "save_path": audio_path,
+                    "start_micros": start_micros,
+                    "end_micros": end_micros,
+                    "original_duration_micros": orig_dur,
+                    "status": "pending",
+                    "error_msg": ""
+                })
+                
+        if not missing_items:
+            messagebox.showinfo("Thông báo", "🎉 Tuyệt vời! Tất cả các câu đều đã có âm thanh hợp lệ trong thư mục tts_audios.\nKhông có câu nào bị lỗi.")
+            return
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-                    futures = {executor.submit(download_missing, idx): idx for idx in missing_indices}
-                    for future in concurrent.futures.as_completed(futures):
-                        if self.is_cancelled:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            break
-                        idx = futures[future]
-                        success = future.result()
-                        if success:
-                            with lock:
-                                for j in range(len(missing_subs)):
-                                    if missing_subs[j].index == subs[idx].index:
-                                        del missing_subs[j]
-                                        break
-                                missing_subs.save(missing_srt_path, encoding='utf-8')
-                                
-                if self.is_cancelled:
-                    self.after(0, lambda: self.label_status.configure(text="Đã huỷ quá trình tải bù audio.", text_color="orange"))
-                    return
-                
-                # Phase 3: Check again
-                missing_indices = []
-                for i, sub in enumerate(subs):
-                    audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
-                    if not os.path.exists(audio_path):
-                        missing_indices.append(i)
-                    else:
-                        try:
-                            audio = MP3(audio_path)
-                            _ = audio.info.length
-                        except Exception:
-                            missing_indices.append(i)
-                
-                if not missing_indices:
-                    if os.path.exists(missing_srt_path):
-                        os.remove(missing_srt_path)
+        def generate_single_item(item, new_text):
+            save_path = item["save_path"]
+            local_client = CapCutClient(device=self.client.device)
+            try:
+                if voice_type.startswith("vi-VN-"):
+                    rate_str = format_edge_tts_rate(float(rate))
+                    generate_edge_tts_sync(new_text, voice_type, rate_str, save_path)
                 else:
-                    missing_items = []
-                    for i in missing_indices:
-                        sub = subs[i]
+                    result = local_client.generate_speech(texts=new_text, voice=voice_type, rate=rate, wait=True)
+                    self.download_audio_from_api(result, save_path)
+
+                audio = MP3(save_path)
+                dur = int(audio.info.length * 1000000)
+                if dur <= 0:
+                    return False, "File âm thanh tải về rỗng (duration 0s)."
+
+                video_speed = 1.0
+                report_item = None
+                orig_dur = item.get("original_duration_micros", item["end_micros"] - item["start_micros"])
+
+                if sync_mode == "Khớp từng câu (Anti-Overlap)":
+                    video_speed = orig_dur / dur if dur > 0 else 1.0
+                    if video_speed < min_vid:
+                        req_spd = dur / (orig_dur / min_vid) if orig_dur > 0 else 2.0
+                        if req_spd > max_aud:
+                            app_spd = max_aud
+                            overlap_sec = (dur / max_aud - (orig_dur / min_vid)) / 1000000.0
+                            report_item = {"index": item["index"] + 1, "text": new_text, "overlap_sec": round(overlap_sec, 2)}
+                        else:
+                            app_spd = req_spd
+                        new_rate = str(round(float(rate) * app_spd, 1))
+                        try:
+                            if voice_type.startswith("vi-VN-"):
+                                new_rate_str = format_edge_tts_rate(float(new_rate))
+                                generate_edge_tts_sync(new_text, voice_type, new_rate_str, save_path)
+                            else:
+                                result = local_client.generate_speech(texts=new_text, voice=voice_type, rate=new_rate, wait=True)
+                                self.download_audio_from_api(result, save_path)
+                            audio = MP3(save_path)
+                            dur = int(audio.info.length * 1000000)
+                            video_speed = orig_dur / dur if dur > 0 else 1.0
+                            if video_speed < min_vid:
+                                video_speed = min_vid
+                        except Exception:
+                            pass
+                    elif video_speed > max_vid:
+                        video_speed = max_vid
+
+                return True, {
+                    "index": item["index"],
+                    "path": save_path,
+                    "start": item["start_micros"],
+                    "end": item["end_micros"],
+                    "duration": dur,
+                    "video_speed": video_speed,
+                    "report_item": report_item
+                }
+            except Exception as ex:
+                return False, str(ex)
+
+        def on_proceed_tab2(resolved, unresolved):
+            def _apply_worker():
+                try:
+                    self.after(0, lambda: self.label_status.configure(text="Đang chèn âm thanh vào dự án CapCut...", text_color="orange"))
+                    final_audio_info = []
+                    for i, sub in enumerate(subs):
+                        text = sub.text.replace("\n", " ").strip()
+                        if not text:
+                            continue
                         start_micros = sub.start.ordinal * 1000
                         end_micros = sub.end.ordinal * 1000
                         orig_dur = end_micros - start_micros
                         audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
-                        sub_id = getattr(sub, 'index', i + 1) or (i + 1)
-                        missing_items.append({
-                            "index": i,
-                            "sub_index": sub_id,
-                            "text": sub.text.replace("\n", " ").strip(),
-                            "sub": sub,
-                            "save_path": audio_path,
-                            "start_micros": start_micros,
-                            "end_micros": end_micros,
-                            "original_duration_micros": orig_dur,
-                            "status": "pending",
-                            "error_msg": ""
-                        })
-
-                    def generate_single_item_merge(item, new_text):
-                        save_path = item["save_path"]
-                        local_client = CapCutClient(device=self.client.device)
-                        try:
-                            if voice_type.startswith("vi-VN-"):
-                                rate_str = format_edge_tts_rate(float(rate))
-                                generate_edge_tts_sync(new_text, voice_type, rate_str, save_path)
-                            else:
-                                result = local_client.generate_speech(texts=new_text, voice=voice_type, rate=rate, wait=True)
-                                self.download_audio_from_api(result, save_path)
-
-                            audio = MP3(save_path)
-                            dur = int(audio.info.length * 1000000)
-                            if dur <= 0:
-                                return False, "File âm thanh tải về rỗng (duration 0s)."
-                            return True, {"duration": dur}
-                        except Exception as ex:
-                            return False, str(ex)
-
-                    user_choice = [None]
-                    dialog_event = threading.Event()
-
-                    def on_dialog_proceed_merge(resolved, unresolved):
-                        user_choice[0] = ("proceed", resolved, unresolved)
-                        dialog_event.set()
-
-                    def on_dialog_cancel_merge():
-                        user_choice[0] = ("cancel",)
-                        dialog_event.set()
-
-                    def show_dialog_merge():
-                        TTSErrorReviewDialog(
-                            parent=self,
-                            missing_items=missing_items,
-                            generate_fn=generate_single_item_merge,
-                            on_proceed_callback=on_dialog_proceed_merge,
-                            on_cancel_callback=on_dialog_cancel_merge,
-                            initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị lỗi cần xử lý.")]
-                        )
-
-                    self.after(0, show_dialog_merge)
-                    dialog_event.wait()
-
-                    if not user_choice[0] or user_choice[0][0] == "cancel":
-                        self.after(0, lambda: self.label_status.configure(text="Đã dừng ghép theo yêu cầu người dùng.", text_color="red"))
-                        return
-
-                    _, resolved_items, unresolved_items = user_choice[0]
-                    if unresolved_items:
-                        rem_subs = pysrt.SubRipFile()
-                        for it in unresolved_items:
-                            rem_subs.append(it["sub"])
-                        rem_subs.save(missing_srt_path, encoding='utf-8')
-                    else:
-                        if os.path.exists(missing_srt_path):
+                        if os.path.exists(audio_path):
                             try:
-                                os.remove(missing_srt_path)
+                                audio = MP3(audio_path)
+                                dur = int(audio.info.length * 1000000)
+                                v_spd = 1.0
+                                if sync_mode == "Khớp từng câu (Anti-Overlap)":
+                                    v_spd = orig_dur / dur if dur > 0 else 1.0
+                                    if v_spd < min_vid: v_spd = min_vid
+                                    elif v_spd > max_vid: v_spd = max_vid
+                                final_audio_info.append({
+                                    "index": i, "path": audio_path, "start": start_micros, "end": end_micros,
+                                    "duration": dur, "video_speed": v_spd, "report_item": None
+                                })
                             except Exception:
-                                pass
+                                final_audio_info.append({
+                                    "index": i, "path": "", "start": start_micros, "end": end_micros,
+                                    "duration": orig_dur, "video_speed": 1.0, "is_dummy": True, "report_item": None
+                                })
+                        else:
+                            final_audio_info.append({
+                                "index": i, "path": "", "start": start_micros, "end": end_micros,
+                                "duration": orig_dur, "video_speed": 1.0, "is_dummy": True, "report_item": None
+                            })
+                    final_audio_info.sort(key=lambda x: x["index"])
+                    modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_speed)
+                    self.after(0, lambda: self.label_status.configure(text="Hoàn tất! Đã cập nhật âm thanh vào dự án CapCut.", text_color="green"))
+                    self.after(0, lambda: messagebox.showinfo("Thành công", "Đã chèn âm thanh vào dự án CapCut thành công!\nVui lòng tải lại dự án trên CapCut."))
+                except Exception as ex:
+                    self.after(0, lambda ex=ex: self.label_status.configure(text=f"Lỗi: {ex}", text_color="red"))
+                    self.after(0, lambda ex=ex: messagebox.showerror("Lỗi", f"Có lỗi xảy ra khi chèn vào CapCut:\n{ex}"))
 
-            audio_info_list = []
-            self.after(0, lambda: self.label_status.configure(text="Đang phân tích và xử lý logic chèn..."))
-            
-            for i, sub in enumerate(subs):
-                if self.is_cancelled:
-                    raise Exception("Đã dừng ghép theo yêu cầu.")
-                text = sub.text.replace("\n", " ").strip()
-                if not text:
-                    continue
-                    
-                start_micros = sub.start.ordinal * 1000
-                end_micros = sub.end.ordinal * 1000
-                original_duration_micros = end_micros - start_micros
-                
-                audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
-                
-                is_dummy = False
-                video_speed = 1.0
-                audio_duration_micros = original_duration_micros
-                
-                if not os.path.exists(audio_path):
-                    is_dummy = True
-                    audio_path = ""
-                else:
-                    try:
-                        audio = MP3(audio_path)
-                        audio_duration_micros = int(audio.info.length * 1000000)
-                        if sync_mode == "Khớp từng câu (dùng cấu hình Tab 2)":
-                            video_speed = original_duration_micros / audio_duration_micros if audio_duration_micros > 0 else 1.0
-                            if video_speed < min_vid_spd:
-                                video_speed = min_vid_spd
-                            elif video_speed > max_vid_spd:
-                                video_speed = max_vid_spd
-                    except Exception:
-                        is_dummy = True
-                        audio_path = ""
-                        
-                audio_info_list.append({
-                    "index": i,
-                    "path": audio_path,
-                    "start": start_micros,
-                    "end": end_micros,
-                    "duration": audio_duration_micros,
-                    "video_speed": video_speed,
-                    "is_dummy": is_dummy,
-                    "report_item": None
-                })
-                
-                progress_val = (i + 1) / total
-                self.after(0, lambda pv=progress_val: self.merge_progressbar.set(pv))
-                self.after(0, lambda c=i+1, t=total: self.merge_label_progress.configure(text=f"Đã phân tích: {c} / {t} câu"))
+            threading.Thread(target=_apply_worker, daemon=True).start()
 
-            if sync_mode == "Khớp từng câu (dùng cấu hình Tab 2)":
-                self.after(0, lambda: self.label_status.configure(text="Đang phân tích timeline và chia nhỏ video..."))
-            elif sync_mode == "Đổi tốc độ toàn bộ (dùng cấu hình Tab 2)":
-                self.after(0, lambda: self.label_status.configure(text="Đang phân tích timeline và thay đổi tốc độ video/audio..."))
-            else:
-                self.after(0, lambda: self.label_status.configure(text="Đang chèn âm thanh vào dự án CapCut..."))
-                
-            modify_capcut_project(json_file, audio_info_list, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_speed)
-            
-            self.after(0, lambda: self.label_status.configure(text="Hoàn tất!", text_color="green"))
-            msg = f"Đã chèn âm thanh thành công!\nVui lòng tải lại dự án trên CapCut."
-            self.after(0, lambda m=msg: messagebox.showinfo("Thành công", m))
-            
-        except Exception as e:
-            self.after(0, lambda e=e: self.label_status.configure(text=f"Lỗi: {e}", text_color="red"))
-            self.after(0, lambda e=e: messagebox.showerror("Lỗi", f"Có lỗi xảy ra:\n{e}"))
-        finally:
-            self.after(0, lambda: self.btn_generate_merge.configure(state="normal", text="Bắt đầu ghép vào CapCut"))
-            self.after(0, lambda: self.btn_stop.configure(state="disabled"))
+        TTSErrorReviewDialog(
+            parent=self,
+            missing_items=missing_items,
+            generate_fn=generate_single_item,
+            on_proceed_callback=on_proceed_tab2,
+            on_cancel_callback=None,
+            initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị thiếu / lỗi cần xử lý.")]
+        )
 
+
+    # --- SPLIT PROJECT TAB ---
     def select_split_project(self):
         folder = filedialog.askdirectory(title="Chọn thư mục dự án CapCut")
         if folder:
