@@ -16,6 +16,7 @@ import edge_tts
 from PIL import Image, ImageTk
 
 from capcut_tts_api import CapCutClient, CapCutError
+from error_review_dialog import TTSErrorReviewDialog
 
 def generate_edge_tts_sync(text, voice, rate_str, save_path, cancel_check=None):
     async def _amain():
@@ -1561,24 +1562,138 @@ class CapCutTTSApp(ctk.CTk):
 
             missing_srt_path = os.path.join(proj_dir, "missing_subs.srt")
             if missing_indices:
-                missing_subs.save(missing_srt_path, encoding='utf-8')
-                ans = [None]
-                event = threading.Event()
-                def ask():
-                    ans[0] = messagebox.askyesno(
-                        "Có câu TTS bị lỗi",
-                        f"Có {len(missing_indices)}/{total} câu không thể tạo giọng đọc (do từ cấm hoặc mạng).\n"
-                        f"Danh sách câu lỗi đã lưu tại:\n{missing_srt_path}\n\n"
-                        "Bạn có muốn BỎ QUA các câu lỗi này và tiếp tục ghép vào CapCut không?\n\n"
-                        "- Chọn YES: Tiếp tục ghép vào CapCut (các đoạn lỗi sẽ không có tiếng).\n"
-                        "- Chọn NO: Dừng lại để bạn chỉnh sửa missing_subs.srt và dùng Tab 'Ghép Audio có sẵn' -> 'Tải bù audio'."
+                missing_items = []
+                for i in missing_indices:
+                    sub = subs[i]
+                    start_micros = sub.start.ordinal * 1000
+                    end_micros = sub.end.ordinal * 1000
+                    orig_dur = end_micros - start_micros
+                    audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
+                    sub_id = getattr(sub, 'index', i + 1) or (i + 1)
+                    missing_items.append({
+                        "index": i,
+                        "sub_index": sub_id,
+                        "text": sub.text.replace("\n", " ").strip(),
+                        "sub": sub,
+                        "save_path": audio_path,
+                        "start_micros": start_micros,
+                        "end_micros": end_micros,
+                        "original_duration_micros": orig_dur,
+                        "status": "pending",
+                        "error_msg": ""
+                    })
+
+                def generate_single_item(item, new_text):
+                    save_path = item["save_path"]
+                    local_client = CapCutClient(device=self.client.device)
+                    try:
+                        if voice_type.startswith("vi-VN-"):
+                            rate_str = format_edge_tts_rate(float(rate))
+                            generate_edge_tts_sync(new_text, voice_type, rate_str, save_path)
+                        else:
+                            result = local_client.generate_speech(texts=new_text, voice=voice_type, rate=rate, wait=True)
+                            self.download_audio_from_api(result, save_path)
+
+                        audio = MP3(save_path)
+                        dur = int(audio.info.length * 1000000)
+                        if dur <= 0:
+                            return False, "File âm thanh tải về rỗng (duration 0s)."
+
+                        video_speed = 1.0
+                        report_item = None
+                        orig_dur = item.get("original_duration_micros", item["end_micros"] - item["start_micros"])
+
+                        if sync_mode == "Khớp từng câu (Anti-Overlap)":
+                            video_speed = orig_dur / dur if dur > 0 else 1.0
+                            if video_speed < min_vid_spd:
+                                req_spd = dur / (orig_dur / min_vid_spd) if orig_dur > 0 else 2.0
+                                if req_spd > max_aud_spd:
+                                    app_spd = max_aud_spd
+                                    overlap_sec = (dur / max_aud_spd - (orig_dur / min_vid_spd)) / 1000000.0
+                                    report_item = {"index": item["index"] + 1, "text": new_text, "overlap_sec": round(overlap_sec, 2)}
+                                else:
+                                    app_spd = req_spd
+                                new_rate = str(round(float(rate) * app_spd, 1))
+                                try:
+                                    if voice_type.startswith("vi-VN-"):
+                                        new_rate_str = format_edge_tts_rate(float(new_rate))
+                                        generate_edge_tts_sync(new_text, voice_type, new_rate_str, save_path)
+                                    else:
+                                        result = local_client.generate_speech(texts=new_text, voice=voice_type, rate=new_rate, wait=True)
+                                        self.download_audio_from_api(result, save_path)
+                                    audio = MP3(save_path)
+                                    dur = int(audio.info.length * 1000000)
+                                    video_speed = orig_dur / dur if dur > 0 else 1.0
+                                    if video_speed < min_vid_spd:
+                                        video_speed = min_vid_spd
+                                except Exception:
+                                    pass
+                            elif video_speed > max_vid_spd:
+                                video_speed = max_vid_spd
+
+                        return True, {
+                            "index": item["index"],
+                            "path": save_path,
+                            "start": item["start_micros"],
+                            "end": item["end_micros"],
+                            "duration": dur,
+                            "video_speed": video_speed,
+                            "report_item": report_item
+                        }
+                    except Exception as ex:
+                        return False, str(ex)
+
+                user_choice = [None]
+                dialog_event = threading.Event()
+
+                def on_dialog_proceed(resolved, unresolved):
+                    user_choice[0] = ("proceed", resolved, unresolved)
+                    dialog_event.set()
+
+                def on_dialog_cancel():
+                    user_choice[0] = ("cancel",)
+                    dialog_event.set()
+
+                def show_dialog():
+                    TTSErrorReviewDialog(
+                        parent=self,
+                        missing_items=missing_items,
+                        generate_fn=generate_single_item,
+                        on_proceed_callback=on_dialog_proceed,
+                        on_cancel_callback=on_dialog_cancel,
+                        initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị lỗi CapCut cần xử lý.")]
                     )
-                    event.set()
-                self.after(0, ask)
-                event.wait()
-                if not ans[0]:
+
+                self.after(0, show_dialog)
+                dialog_event.wait()
+
+                if not user_choice[0] or user_choice[0][0] == "cancel":
+                    missing_subs = pysrt.SubRipFile()
+                    for it in missing_items:
+                        if it.get("status") != "success":
+                            missing_subs.append(it["sub"])
+                    if missing_subs:
+                        missing_subs.save(missing_srt_path, encoding='utf-8')
                     self.after(0, lambda: self.label_status.configure(text=f"Đã dừng. Danh sách câu lỗi lưu tại missing_subs.srt", text_color="orange"))
                     return
+
+                # Proceed
+                _, resolved_items, unresolved_items = user_choice[0]
+                for res_it in resolved_items:
+                    if "result_info" in res_it and res_it["result_info"]:
+                        audio_info_list.append(res_it["result_info"])
+
+                if unresolved_items:
+                    rem_subs = pysrt.SubRipFile()
+                    for it in unresolved_items:
+                        rem_subs.append(it["sub"])
+                    rem_subs.save(missing_srt_path, encoding='utf-8')
+                else:
+                    if os.path.exists(missing_srt_path):
+                        try:
+                            os.remove(missing_srt_path)
+                        except Exception:
+                            pass
             else:
                 if os.path.exists(missing_srt_path):
                     try:
@@ -1840,19 +1955,86 @@ class CapCutTTSApp(ctk.CTk):
                     if os.path.exists(missing_srt_path):
                         os.remove(missing_srt_path)
                 else:
-                    ans = [None]
-                    event = threading.Event()
-                    def ask():
-                        ans[0] = messagebox.askyesno(
-                            "Tải bù thất bại",
-                            f"Có {len(missing_indices)} câu không thể tạo giọng đọc (API lỗi/từ chối). Danh sách lưu tại:\n{missing_srt_path}\n\nBạn có muốn BỎ QUA các câu này (không ghép tiếng đoạn đó) và tiếp tục ghép vào CapCut không?\n\nChọn Yes để bỏ qua và tiếp tục.\nChọn No để DỪNG LẠI và tự xử lý."
+                    missing_items = []
+                    for i in missing_indices:
+                        sub = subs[i]
+                        start_micros = sub.start.ordinal * 1000
+                        end_micros = sub.end.ordinal * 1000
+                        orig_dur = end_micros - start_micros
+                        audio_path = os.path.join(audio_dir, f"audio_{i+1:04d}.mp3")
+                        sub_id = getattr(sub, 'index', i + 1) or (i + 1)
+                        missing_items.append({
+                            "index": i,
+                            "sub_index": sub_id,
+                            "text": sub.text.replace("\n", " ").strip(),
+                            "sub": sub,
+                            "save_path": audio_path,
+                            "start_micros": start_micros,
+                            "end_micros": end_micros,
+                            "original_duration_micros": orig_dur,
+                            "status": "pending",
+                            "error_msg": ""
+                        })
+
+                    def generate_single_item_merge(item, new_text):
+                        save_path = item["save_path"]
+                        local_client = CapCutClient(device=self.client.device)
+                        try:
+                            if voice_type.startswith("vi-VN-"):
+                                rate_str = format_edge_tts_rate(float(rate))
+                                generate_edge_tts_sync(new_text, voice_type, rate_str, save_path)
+                            else:
+                                result = local_client.generate_speech(texts=new_text, voice=voice_type, rate=rate, wait=True)
+                                self.download_audio_from_api(result, save_path)
+
+                            audio = MP3(save_path)
+                            dur = int(audio.info.length * 1000000)
+                            if dur <= 0:
+                                return False, "File âm thanh tải về rỗng (duration 0s)."
+                            return True, {"duration": dur}
+                        except Exception as ex:
+                            return False, str(ex)
+
+                    user_choice = [None]
+                    dialog_event = threading.Event()
+
+                    def on_dialog_proceed_merge(resolved, unresolved):
+                        user_choice[0] = ("proceed", resolved, unresolved)
+                        dialog_event.set()
+
+                    def on_dialog_cancel_merge():
+                        user_choice[0] = ("cancel",)
+                        dialog_event.set()
+
+                    def show_dialog_merge():
+                        TTSErrorReviewDialog(
+                            parent=self,
+                            missing_items=missing_items,
+                            generate_fn=generate_single_item_merge,
+                            on_proceed_callback=on_dialog_proceed_merge,
+                            on_cancel_callback=on_dialog_cancel_merge,
+                            initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị lỗi cần xử lý.")]
                         )
-                        event.set()
-                    self.after(0, ask)
-                    event.wait()
-                    if not ans[0]:
+
+                    self.after(0, show_dialog_merge)
+                    dialog_event.wait()
+
+                    if not user_choice[0] or user_choice[0][0] == "cancel":
                         self.after(0, lambda: self.label_status.configure(text="Đã dừng ghép theo yêu cầu người dùng.", text_color="red"))
                         return
+
+                    _, resolved_items, unresolved_items = user_choice[0]
+                    if unresolved_items:
+                        rem_subs = pysrt.SubRipFile()
+                        for it in unresolved_items:
+                            rem_subs.append(it["sub"])
+                        rem_subs.save(missing_srt_path, encoding='utf-8')
+                    else:
+                        if os.path.exists(missing_srt_path):
+                            try:
+                                os.remove(missing_srt_path)
+                            except Exception:
+                                pass
 
             audio_info_list = []
             self.after(0, lambda: self.label_status.configure(text="Đang phân tích và xử lý logic chèn..."))
