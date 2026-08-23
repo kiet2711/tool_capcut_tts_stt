@@ -2,7 +2,14 @@
 High-level Python API Client for CapCut Text-to-Speech (TTS) and Speech-to-Text (STT) tasks.
 """
 
+import concurrent.futures
 import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -16,7 +23,7 @@ except ImportError:
 
 from capcut_tts_api.config import BASE_URL
 from capcut_tts_api.exceptions import CapCutAPIError, CapCutError, CapCutTaskError
-from capcut_tts_api.models import DeviceConfig, SubtitleResult, UploadResult, VoiceInfo
+from capcut_tts_api.models import DeviceConfig, SubtitleResult, UploadResult, Utterance, VoiceInfo, Word
 from capcut_tts_api.signer import (
     base_headers,
     compact_json,
@@ -26,6 +33,146 @@ from capcut_tts_api.signer import (
     make_tts_payload_sign,
 )
 from capcut_tts_api.uploader import VODUploader
+
+
+def get_media_duration(file_path: Union[str, Path]) -> float:
+    """Get media duration in seconds via ffprobe or ffmpeg."""
+    path_str = str(file_path)
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    # 1. Try ffprobe
+    try:
+        res = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path_str,
+            ],
+            capture_output=True,
+            text=True,
+            startupinfo=startupinfo,
+            timeout=15,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            val = float(res.stdout.strip())
+            if val > 0:
+                return val
+    except Exception:
+        pass
+
+    # 2. Fallback to ffmpeg -i
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-i", path_str],
+            capture_output=True,
+            text=True,
+            startupinfo=startupinfo,
+            timeout=15,
+        )
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
+        if match:
+            h = int(match.group(1))
+            m = int(match.group(2))
+            s = float(match.group(3))
+            return h * 3600 + m * 60 + s
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def extract_audio_chunk(
+    source_path: Union[str, Path],
+    start_sec: float,
+    duration_sec: float,
+    output_path: Union[str, Path],
+) -> str:
+    """
+    Extract a slice of media and compress to lightweight 64kbps mono MP3 (24000Hz).
+    """
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(start_sec),
+        "-t",
+        str(duration_sec),
+        "-i",
+        str(source_path),
+        "-vn",
+        "-acodec",
+        "libmp3lame",
+        "-b:a",
+        "64k",
+        "-ac",
+        "1",
+        "-ar",
+        "24000",
+        str(output_path),
+    ]
+    res = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        startupinfo=startupinfo,
+        timeout=300,
+    )
+    if res.returncode != 0 or not os.path.exists(output_path):
+        raise CapCutError(f"Lỗi trích xuất phân đoạn âm thanh (FFmpeg): {res.stderr}")
+    return str(output_path)
+
+
+def compress_to_lightweight_audio(
+    source_path: Union[str, Path],
+    output_path: Union[str, Path],
+) -> str:
+    """
+    Compress media to lightweight 64kbps mono MP3 (24000Hz) for fast STT upload.
+    """
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-acodec",
+        "libmp3lame",
+        "-b:a",
+        "64k",
+        "-ac",
+        "1",
+        "-ar",
+        "24000",
+        str(output_path),
+    ]
+    res = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        startupinfo=startupinfo,
+        timeout=600,
+    )
+    if res.returncode != 0 or not os.path.exists(output_path):
+        raise CapCutError(f"Lỗi tối ưu âm thanh STT (FFmpeg): {res.stderr}")
+    return str(output_path)
 
 
 def _checked_json_response(resp: Any, label: str) -> Dict[str, Any]:
@@ -526,6 +673,299 @@ class CapCutClient:
             return SubtitleResult.from_payload(payload_dict)
         except Exception as exc:
             raise CapCutError(f"Failed to parse subtitle payload: {exc}") from exc
+
+    def transcribe_large_media(
+        self,
+        media_path: Union[str, Path],
+        language: str = "vi-VN",
+        translation_language: str = "vi-VN",
+        use_translation: bool = False,
+        chunk_duration_sec: int = 600,
+        concurrency: int = 3,
+        progress_callback: Optional[callable] = None,
+        cancel_check: Optional[callable] = None,
+    ) -> SubtitleResult:
+        """
+        High-performance Large Media Transcriber with Auto-Chunking, Multi-threading & Timeline Stitching.
+        Supports seamless large file STT recognition (1-3 hours) without timeouts or VOD size errors.
+        """
+        if cancel_check and cancel_check():
+            raise CapCutError("Đã huỷ bởi người dùng.")
+
+        media_path = Path(media_path)
+        if not media_path.exists():
+            raise CapCutError(f"Không tìm thấy file: {media_path}")
+
+        if progress_callback:
+            progress_callback({
+                "phase": "probing",
+                "progress": 0.05,
+                "message": "Đang kiểm tra thông tin file và thời lượng âm thanh..."
+            })
+
+        total_duration = get_media_duration(media_path)
+        file_size = os.path.getsize(media_path)
+        is_small_file = (total_duration > 0 and total_duration <= chunk_duration_sec and file_size <= 25 * 1024 * 1024)
+
+        # Case 1: Small file (<= 10 mins and <= 25MB) -> compress to 64k mono MP3 and transcribe directly
+        if is_small_file:
+            if progress_callback:
+                progress_callback({
+                    "phase": "compressing",
+                    "progress": 0.15,
+                    "message": "File nhỏ (<10 phút), đang tối ưu âm thanh (64k mono)..."
+                })
+
+            temp_mp3 = media_path.parent / f"stt_opt_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp3"
+            try:
+                compress_to_lightweight_audio(media_path, temp_mp3)
+                target_file = temp_mp3 if temp_mp3.exists() else media_path
+
+                if progress_callback:
+                    progress_callback({
+                        "phase": "uploading",
+                        "progress": 0.30,
+                        "message": "Đang tải file âm thanh lên CapCut Cloud..."
+                    })
+
+                result = None
+                last_err = None
+                for attempt in range(3):
+                    if cancel_check and cancel_check():
+                        raise CapCutError("Đã huỷ bởi người dùng.")
+                    try:
+                        worker_client = CapCutClient()
+                        upload_res = worker_client.upload_audio(target_file)
+
+                        if progress_callback:
+                            progress_callback({
+                                "phase": "creating_task",
+                                "progress": 0.50,
+                                "message": "Đang khởi tạo tác vụ nhận diện giọng nói (STT)..."
+                            })
+
+                        stt_task = worker_client.create_stt_task(
+                            audio_vid=upload_res.vid,
+                            audio_md5=upload_res.md5,
+                            duration_ms=upload_res.duration_ms or int(total_duration * 1000) or 10000,
+                            language=language,
+                            translation_language=translation_language,
+                            use_translation=use_translation,
+                        )
+                        tasks = (stt_task.get("data") or {}).get("tasks") or []
+                        if not tasks:
+                            raise CapCutError(f"Không nhận được task từ API: {stt_task}")
+                        task_id = tasks[0]["id"]
+                        token = tasks[0]["token"]
+
+                        start_poll = time.time()
+                        while time.time() - start_poll < 300:
+                            if cancel_check and cancel_check():
+                                raise CapCutError("Đã huỷ bởi người dùng.")
+                            elapsed = int(time.time() - start_poll)
+                            pct = min(0.95, 0.50 + (elapsed / 60) * 0.40)
+                            if progress_callback:
+                                progress_callback({
+                                    "phase": "polling",
+                                    "progress": pct,
+                                    "message": f"Máy chủ đang nhận diện giọng nói... ({elapsed}s)"
+                                })
+                            q = worker_client.query_stt_task(task_id, token)
+                            q_tasks = (q.get("data") or {}).get("tasks") or []
+                            if q_tasks:
+                                status = q_tasks[0].get("status")
+                                if status in ("success", "succeed"):
+                                    result = worker_client.extract_subtitles(q)
+                                    break
+                                elif status == "failed":
+                                    raise CapCutError("CapCut báo lỗi xử lý thất bại (file không có giọng nói hoặc định dạng lỗi).")
+                            time.sleep(2.0)
+
+                        if result:
+                            break
+                        raise CapCutError("Quá thời gian chờ phản hồi STT (5 phút).")
+                    except Exception as exc:
+                        last_err = exc
+                        if cancel_check and cancel_check():
+                            raise CapCutError("Đã huỷ bởi người dùng.")
+                        time.sleep(1.0)
+
+                if result is None:
+                    raise CapCutError(f"Nhận diện STT thất bại sau 3 lần thử: {last_err}")
+                return result
+
+            finally:
+                if temp_mp3.exists():
+                    try:
+                        temp_mp3.unlink()
+                    except Exception:
+                        pass
+
+        # Case 2: Large file -> Auto-chunking + Multi-threaded Concurrency Pool
+        session_dir = media_path.parent / f"stt_chunks_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            effective_duration = total_duration if total_duration > 0 else 3600.0
+            num_chunks = max(1, math.ceil(effective_duration / chunk_duration_sec))
+
+            if progress_callback:
+                progress_callback({
+                    "phase": "chunking",
+                    "progress": 0.10,
+                    "message": f"Tệp dài {int(effective_duration // 60)} phút. Đang cắt thành {num_chunks} phân đoạn (10 phút/đoạn)..."
+                })
+
+            # Step 1: Slice chunks
+            chunk_info_list = []
+            for i in range(num_chunks):
+                if cancel_check and cancel_check():
+                    raise CapCutError("Đã huỷ bởi người dùng.")
+                start_sec = i * chunk_duration_sec
+                dur_sec = min(chunk_duration_sec, effective_duration - start_sec)
+                out_path = session_dir / f"chunk_{i:03d}.mp3"
+                extract_audio_chunk(media_path, start_sec, dur_sec, out_path)
+                chunk_info_list.append({
+                    "index": i,
+                    "start_sec": start_sec,
+                    "dur_sec": dur_sec,
+                    "file_path": out_path
+                })
+
+            if progress_callback:
+                progress_callback({
+                    "phase": "transcribing_pool",
+                    "progress": 0.15,
+                    "message": f"Đã cắt xong {num_chunks} đoạn. Đang khởi chạy {min(concurrency, num_chunks)} luồng nhận diện song song..."
+                })
+
+            # Step 2: Multi-threaded pool
+            chunk_results = [None] * num_chunks
+            completed_count = 0
+            lock = threading.Lock()
+
+            def process_single_chunk(chunk_item):
+                nonlocal completed_count
+                idx = chunk_item["index"]
+                c_path = chunk_item["file_path"]
+                dur_ms = int(chunk_item["dur_sec"] * 1000)
+
+                for attempt in range(3):
+                    if cancel_check and cancel_check():
+                        raise CapCutError("Đã huỷ bởi người dùng.")
+                    try:
+                        worker_client = CapCutClient()
+                        upload_res = worker_client.upload_audio(c_path)
+
+                        stt_task = worker_client.create_stt_task(
+                            audio_vid=upload_res.vid,
+                            audio_md5=upload_res.md5,
+                            duration_ms=upload_res.duration_ms or dur_ms,
+                            language=language,
+                            translation_language=translation_language,
+                            use_translation=use_translation,
+                        )
+                        tasks = (stt_task.get("data") or {}).get("tasks") or []
+                        if not tasks:
+                            raise CapCutError(f"Không nhận được task từ API: {stt_task}")
+                        task_id = tasks[0]["id"]
+                        token = tasks[0]["token"]
+
+                        start_poll = time.time()
+                        while time.time() - start_poll < 300:
+                            if cancel_check and cancel_check():
+                                raise CapCutError("Đã huỷ bởi người dùng.")
+                            q = worker_client.query_stt_task(task_id, token)
+                            q_tasks = (q.get("data") or {}).get("tasks") or []
+                            if q_tasks:
+                                status = q_tasks[0].get("status")
+                                if status in ("success", "succeed"):
+                                    sub_res = worker_client.extract_subtitles(q)
+                                    chunk_results[idx] = sub_res
+                                    break
+                                elif status == "failed":
+                                    raise CapCutError("CapCut báo lỗi nhận diện thất bại.")
+                            time.sleep(2.0)
+
+                        if chunk_results[idx] is not None:
+                            break
+                    except Exception as e:
+                        if cancel_check and cancel_check():
+                            raise CapCutError("Đã huỷ bởi người dùng.")
+                        time.sleep(1.0)
+
+                with lock:
+                    completed_count += 1
+                    pct = min(0.95, 0.15 + (completed_count / num_chunks) * 0.80)
+                    if progress_callback:
+                        progress_callback({
+                            "phase": "processing",
+                            "completed": completed_count,
+                            "total": num_chunks,
+                            "progress": pct,
+                            "message": f"Đang nhận diện đa luồng: Đã xong {completed_count}/{num_chunks} đoạn ({int(completed_count / num_chunks * 100)}%)..."
+                        })
+
+            active_workers = min(concurrency, num_chunks)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=active_workers) as executor:
+                futures = [executor.submit(process_single_chunk, chunk) for chunk in chunk_info_list]
+                for fut in concurrent.futures.as_completed(futures):
+                    if cancel_check and cancel_check():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise CapCutError("Đã huỷ bởi người dùng.")
+                    fut.result()
+
+            # Step 3: Timeline Offset Stitching
+            if progress_callback:
+                progress_callback({
+                    "phase": "stitching",
+                    "progress": 0.96,
+                    "message": "Đang tổng hợp và đồng bộ mốc thời gian phụ đề..."
+                })
+
+            all_utterances = []
+            full_text_parts = []
+
+            for i, chunk in enumerate(chunk_info_list):
+                res = chunk_results[i]
+                if not res or not res.utterances:
+                    continue
+                offset_ms = int(chunk["start_sec"] * 1000)
+
+                for ut in res.utterances:
+                    start_ms = ut.start_time + offset_ms
+                    end_ms = ut.end_time + offset_ms
+                    words = [
+                        Word(
+                            text=w.text,
+                            start_time=w.start_time + offset_ms,
+                            end_time=w.end_time + offset_ms,
+                            blank_duration=w.blank_duration,
+                        )
+                        for w in ut.words
+                    ]
+                    all_utterances.append(
+                        Utterance(
+                            text=ut.text,
+                            start_time=start_ms,
+                            end_time=end_ms,
+                            words=words,
+                        )
+                    )
+                    if ut.text and ut.text.strip():
+                        full_text_parts.append(ut.text.strip())
+
+            return SubtitleResult(
+                utterances=all_utterances,
+                full_text=" ".join(full_text_parts),
+            )
+
+        finally:
+            if session_dir.exists():
+                try:
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
     def list_voices(
         self, lang: Optional[str] = None, catalog_path: Optional[Union[str, Path]] = None

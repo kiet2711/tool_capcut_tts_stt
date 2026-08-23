@@ -2,8 +2,6 @@
     "val_min_video": "0.5",
     "val_max_video": "1.2",
     "val_max_audio": "1.3",
-    "val_rest_time": "0",
-    "val_rest_blocks": "300",
     "val_id_blocks": "300",
     "sync_mode": "Khớp từng câu (Anti-Overlap)",
     "fixed_vid_speed": "0.5",
@@ -14,5 +12,12 @@
     "wm_path": "D:/bilibili/mp4 gốc/tên kênh.png",
     "wm_x": "1000",
     "wm_y": "200",
-    "wm_scale": "37"
+    "wm_scale": "37",
+    "threads_basic": 20,
+    "threads_srt": 54,
+    "threads_stt": 7,
+    "trans_api_keys": "",
+    "trans_model": "gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)",
+    "trans_style": "",
+    "trans_concurrency": "🚀 Tự Động (Theo số lượng API Key)"
 }

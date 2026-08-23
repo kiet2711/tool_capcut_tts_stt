@@ -139,6 +139,28 @@ class SubtitleResult:
             )
         return cls(utterances=utterance_list, full_text=" ".join(text_parts))
 
+    def to_srt_string(self) -> str:
+        """Convert utterances to standard SRT subtitle formatted string."""
+        def ms_to_srt(ms: int) -> str:
+            total_sec = max(0, ms // 1000)
+            milli = max(0, ms % 1000)
+            hours = total_sec // 3600
+            mins = (total_sec % 3600) // 60
+            secs = total_sec % 60
+            return f"{hours:02d}:{mins:02d}:{secs:02d},{milli:03d}"
+
+        srt_blocks = []
+        for idx, ut in enumerate(self.utterances, 1):
+            text = (ut.text or "").strip()
+            if text:
+                srt_blocks.append(f"{idx}\n{ms_to_srt(ut.start_time)} --> {ms_to_srt(ut.end_time)}\n{text}\n")
+        return "\n".join(srt_blocks)
+
+    def save_srt(self, file_path: Union[str, Path], encoding: str = "utf-8"):
+        """Save utterances to an SRT subtitle file."""
+        with open(file_path, "w", encoding=encoding) as f:
+            f.write(self.to_srt_string())
+
 
 @dataclass
 class VoiceInfo:

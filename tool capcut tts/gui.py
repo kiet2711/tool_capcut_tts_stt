@@ -7,6 +7,8 @@ import json
 import uuid
 import shutil
 import base64
+import re
+import math
 import requests
 import time
 import pysrt
@@ -16,7 +18,13 @@ import edge_tts
 from PIL import Image, ImageTk
 
 from capcut_tts_api import CapCutClient, CapCutError
+from capcut_tts_api.translator import (
+    GeminiTranslator, SrtItem, parse_srt, build_srt, build_ass, is_srt_content,
+    MODEL_MAP, STYLE_PRESETS, CONCURRENCY_OPTIONS, parse_concurrency_val,
+    count_units, get_chunk_config, chunk_srt_items, chunk_raw_text
+)
 from error_review_dialog import TTSErrorReviewDialog
+from api_key_manager_dialog import ApiKeyManagerDialog
 
 def generate_edge_tts_sync(text, voice, rate_str, save_path, cancel_check=None):
     async def _amain():
@@ -486,28 +494,18 @@ class CapCutTTSApp(ctk.CTk):
         self.label_voice = ctk.CTkLabel(self.frame_top, text="Chọn Giọng Đọc:", font=ctk.CTkFont(weight="bold"))
         self.label_voice.grid(row=0, column=0, padx=10, pady=10, sticky="w")
         
-        self.combo_voice = ctk.CTkComboBox(self.frame_top, values=["Đang tải..."], width=200)
+        self.combo_voice = ctk.CTkComboBox(self.frame_top, values=["Đang tải..."], width=220)
         self.combo_voice.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         
         self.label_rate = ctk.CTkLabel(self.frame_top, text="Tốc độ:", font=ctk.CTkFont(weight="bold"))
-        self.label_rate.grid(row=0, column=2, padx=5, pady=10, sticky="w")
+        self.label_rate.grid(row=0, column=2, padx=10, pady=10, sticky="w")
         
-        self.slider_rate = ctk.CTkSlider(self.frame_top, from_=0.5, to=2.0, number_of_steps=15, command=self.update_rate_label, width=100)
+        self.slider_rate = ctk.CTkSlider(self.frame_top, from_=0.5, to=2.0, number_of_steps=15, command=self.update_rate_label, width=120)
         self.slider_rate.set(1.0)
         self.slider_rate.grid(row=0, column=3, padx=5, pady=10, sticky="ew")
 
         self.label_rate_val = ctk.CTkLabel(self.frame_top, text="1.0")
         self.label_rate_val.grid(row=0, column=4, padx=5, pady=10, sticky="w")
-        
-        self.label_threads = ctk.CTkLabel(self.frame_top, text="Luồng (Threads):", font=ctk.CTkFont(weight="bold"))
-        self.label_threads.grid(row=0, column=5, padx=5, pady=10, sticky="w")
-        
-        self.slider_threads = ctk.CTkSlider(self.frame_top, from_=1, to=200, number_of_steps=199, command=self.update_threads_label, width=100)
-        self.slider_threads.set(50)
-        self.slider_threads.grid(row=0, column=6, padx=5, pady=10, sticky="ew")
-
-        self.label_threads_val = ctk.CTkLabel(self.frame_top, text="50")
-        self.label_threads_val.grid(row=0, column=7, padx=5, pady=10, sticky="w")
 
         # 2. Tabs for Modes
         self.tabview = ctk.CTkTabview(self)
@@ -516,6 +514,7 @@ class CapCutTTSApp(ctk.CTk):
         self.tab_srt = self.tabview.add("Chèn SRT vào CapCut")
         self.tab_split = self.tabview.add("Chia Nhỏ Project")
         self.tab_stt = self.tabview.add("Nhận diện (STT)")
+        self.tab_trans = self.tabview.add("Dịch Thuật (AI)")
         
         # -- Tab 1: Basic TTS --
         self.tab_basic.grid_columnconfigure(0, weight=1)
@@ -524,8 +523,21 @@ class CapCutTTSApp(ctk.CTk):
         self.text_input.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
         self.text_input.insert("1.0", "Xin chào! Bạn có thể nhập nội dung văn bản vào đây để tôi đọc cho bạn nghe nhé.")
         
-        self.btn_generate_basic = ctk.CTkButton(self.tab_basic, text="Tạo Giọng Nói (TTS) và Lưu...", font=ctk.CTkFont(size=16, weight="bold"), height=45, command=self.on_generate_basic)
-        self.btn_generate_basic.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        self.frame_basic_bottom = ctk.CTkFrame(self.tab_basic, fg_color="transparent")
+        self.frame_basic_bottom.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
+        self.frame_basic_bottom.grid_columnconfigure(0, weight=1)
+        
+        self.frame_threads_basic = ctk.CTkFrame(self.frame_basic_bottom, fg_color="transparent")
+        self.frame_threads_basic.grid(row=0, column=0, sticky="w", pady=(0, 5))
+        ctk.CTkLabel(self.frame_threads_basic, text="Số luồng tạo TTS (1-100):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=(0, 5), sticky="w")
+        self.slider_threads_basic = ctk.CTkSlider(self.frame_threads_basic, from_=1, to=100, number_of_steps=99, command=self.update_threads_basic_label, width=130)
+        self.slider_threads_basic.set(20)
+        self.slider_threads_basic.grid(row=0, column=1, padx=5, sticky="w")
+        self.label_threads_basic_val = ctk.CTkLabel(self.frame_threads_basic, text="20", font=ctk.CTkFont(weight="bold"))
+        self.label_threads_basic_val.grid(row=0, column=2, padx=5, sticky="w")
+        
+        self.btn_generate_basic = ctk.CTkButton(self.frame_basic_bottom, text="Tạo Giọng Nói (TTS) và Lưu...", font=ctk.CTkFont(size=16, weight="bold"), height=45, command=self.on_generate_basic)
+        self.btn_generate_basic.grid(row=1, column=0, sticky="ew")
         
         # -- Tab 2: SRT to CapCut --
         self.tab_srt.grid_columnconfigure(1, weight=1)
@@ -550,12 +562,22 @@ class CapCutTTSApp(ctk.CTk):
         self.label_progress = ctk.CTkLabel(self.tab_srt, text="Tiến độ: 0 / 0 câu")
         self.label_progress.grid(row=3, column=0, columnspan=3, padx=10, pady=5)
         
-        # Sync Video Options
-        ctk.CTkLabel(self.tab_srt, text="Chế độ đồng bộ:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
+        # Sync Video Options & Threads
+        self.frame_srt_row4 = ctk.CTkFrame(self.tab_srt, fg_color="transparent")
+        self.frame_srt_row4.grid(row=4, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
+        
+        ctk.CTkLabel(self.frame_srt_row4, text="Chế độ đồng bộ:").grid(row=0, column=0, padx=(0, 5), sticky="w")
         self.combo_sync_mode_var = ctk.StringVar(value="Khớp từng câu (Anti-Overlap)")
         self.combo_sync_mode_var.trace_add("write", lambda *args: self.save_sync_config(silent=True))
-        self.combo_sync_mode = ctk.CTkComboBox(self.tab_srt, values=["Không đồng bộ", "Khớp từng câu (Anti-Overlap)", "Đổi tốc độ toàn bộ (Fixed Speed)"], variable=self.combo_sync_mode_var, command=self.toggle_sync_opts, width=280)
-        self.combo_sync_mode.grid(row=4, column=1, columnspan=2, padx=10, pady=5, sticky="w")
+        self.combo_sync_mode = ctk.CTkComboBox(self.frame_srt_row4, values=["Không đồng bộ", "Khớp từng câu (Anti-Overlap)", "Đổi tốc độ toàn bộ (Fixed Speed)"], variable=self.combo_sync_mode_var, command=self.toggle_sync_opts, width=240)
+        self.combo_sync_mode.grid(row=0, column=1, padx=(0, 20), sticky="w")
+        
+        ctk.CTkLabel(self.frame_srt_row4, text="Số luồng (1-100):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=2, padx=(0, 5), sticky="w")
+        self.slider_threads_srt = ctk.CTkSlider(self.frame_srt_row4, from_=1, to=100, number_of_steps=99, command=self.update_threads_srt_label, width=120)
+        self.slider_threads_srt.set(50)
+        self.slider_threads_srt.grid(row=0, column=3, padx=5, sticky="w")
+        self.label_threads_srt_val = ctk.CTkLabel(self.frame_srt_row4, text="50", font=ctk.CTkFont(weight="bold"))
+        self.label_threads_srt_val.grid(row=0, column=4, padx=5, sticky="w")
         
         self.frame_sync_opts = ctk.CTkFrame(self.tab_srt)
         self.frame_sync_opts.grid(row=5, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
@@ -616,7 +638,7 @@ class CapCutTTSApp(ctk.CTk):
         self.btn_split_project = ctk.CTkButton(self.tab_split, text="Bắt đầu chia nhỏ", font=ctk.CTkFont(size=16, weight="bold"), height=45, command=self.on_split_project)
         self.btn_split_project.grid(row=2, column=0, columnspan=3, padx=10, pady=20, sticky="ew")
 
-        # -- Tab 5: STT --
+        # -- Tab 4: STT --
         self.tab_stt.grid_columnconfigure(1, weight=1)
         
         self.stt_media_path = ctk.StringVar()
@@ -625,9 +647,20 @@ class CapCutTTSApp(ctk.CTk):
         ctk.CTkButton(self.tab_stt, text="Chọn", width=60, command=self.select_stt_media).grid(row=0, column=2, padx=10, pady=10)
         
         ctk.CTkLabel(self.tab_stt, text="Ngôn ngữ gốc:").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        self.stt_lang_combo = ctk.CTkComboBox(self.tab_stt, values=["vi-VN", "zh-CN", "en-US", "ja-JP", "ko-KR", "th-TH", "id-ID", "ms-MY"])
-        self.stt_lang_combo.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+        
+        self.frame_stt_row1 = ctk.CTkFrame(self.tab_stt, fg_color="transparent")
+        self.frame_stt_row1.grid(row=1, column=1, columnspan=2, padx=10, pady=10, sticky="ew")
+        
+        self.stt_lang_combo = ctk.CTkComboBox(self.frame_stt_row1, values=["vi-VN", "zh-CN", "en-US", "ja-JP", "ko-KR", "th-TH", "id-ID", "ms-MY"], width=130)
+        self.stt_lang_combo.grid(row=0, column=0, padx=(0, 20), sticky="w")
         self.stt_lang_combo.set("zh-CN")
+        
+        ctk.CTkLabel(self.frame_stt_row1, text="Số luồng STT (1-10):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, padx=(0, 5), sticky="w")
+        self.slider_threads_stt = ctk.CTkSlider(self.frame_stt_row1, from_=1, to=10, number_of_steps=9, command=self.update_threads_stt_label, width=120)
+        self.slider_threads_stt.set(3)
+        self.slider_threads_stt.grid(row=0, column=2, padx=5, sticky="w")
+        self.label_threads_stt_val = ctk.CTkLabel(self.frame_stt_row1, text="3", font=ctk.CTkFont(weight="bold"))
+        self.label_threads_stt_val.grid(row=0, column=3, padx=5, sticky="w")
         
         self.chk_stt_translate_var = ctk.BooleanVar(value=False)
         self.chk_stt_translate = ctk.CTkCheckBox(self.tab_stt, text="Bật dịch thuật sang:", variable=self.chk_stt_translate_var, command=self.toggle_stt_translate)
@@ -644,6 +677,150 @@ class CapCutTTSApp(ctk.CTk):
         
         self.btn_generate_stt = ctk.CTkButton(self.tab_stt, text="Bắt đầu trích xuất SRT", font=ctk.CTkFont(size=16, weight="bold"), height=45, command=self.on_generate_stt)
         self.btn_generate_stt.grid(row=4, column=0, columnspan=3, padx=10, pady=20, sticky="ew")
+
+        # -- Tab 5: Dịch Thuật (AI) --
+        self.tab_trans.grid_columnconfigure(0, weight=1)
+        self.tab_trans.grid_rowconfigure(3, weight=1)
+
+        # 1. Config Bar Top (Row 0)
+        self.frame_trans_top = ctk.CTkFrame(self.tab_trans)
+        self.frame_trans_top.grid(row=0, column=0, padx=10, pady=(5, 3), sticky="ew")
+
+        # Row 0 of top: API Keys + Model + Threads
+        ctk.CTkLabel(self.frame_trans_top, text="🔑 Gemini API:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=(10, 2), pady=5, sticky="w")
+        self.trans_api_key_var = ctk.StringVar()
+        self.trans_api_key_var.trace_add("write", lambda *args: (self.save_sync_config(silent=True), self.update_key_badge(), self.update_trans_estimate()))
+        
+        self.btn_open_key_mgr = ctk.CTkButton(
+            self.frame_trans_top,
+            text="🔑 Quản Lý & Test Keys",
+            width=180,
+            height=30,
+            fg_color="#4338ca",
+            hover_color="#3730a3",
+            font=ctk.CTkFont(weight="bold"),
+            command=self.open_api_key_manager
+        )
+        self.btn_open_key_mgr.grid(row=0, column=1, padx=2, pady=5, sticky="w")
+
+        self.lbl_key_badge = ctk.CTkLabel(self.frame_trans_top, text="(0 Key)", font=ctk.CTkFont(size=12, weight="bold"), text_color="#38bdf8")
+        self.lbl_key_badge.grid(row=0, column=2, padx=(2, 10), pady=5, sticky="w")
+
+        ctk.CTkLabel(self.frame_trans_top, text="🤖 Model AI:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=3, padx=(5, 2), pady=5, sticky="w")
+        self.trans_model_var = ctk.StringVar(value="gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)")
+        self.trans_model_var.trace_add("write", lambda *args: (self.save_sync_config(silent=True), self.update_trans_estimate()))
+        self.trans_model_combo = ctk.CTkComboBox(
+            self.frame_trans_top,
+            values=[
+                "gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)",
+                "gemini-3.6-flash (Zhihu kịch tính - Gộp 1 Request)",
+                "gemma-4-31b-it (14.400 RPD - Băm nhỏ an toàn 16k TPM)",
+                "gemma-4-26b-a4b-it (14.400 RPD MoE - Tốc độ cao)",
+                "gemini-3.7-flash (Thế hệ 3.7 - 20 RPD)",
+                "gemini-2.5-flash-lite (10 RPM / 20 RPD)"
+            ],
+            variable=self.trans_model_var,
+            width=330
+        )
+        self.trans_model_combo.grid(row=0, column=4, padx=2, pady=5, sticky="w")
+
+        ctk.CTkLabel(self.frame_trans_top, text="⚡ Số Luồng Dịch (1 - 20):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=5, padx=(10, 2), pady=5, sticky="w")
+        self.trans_concurrency_var = ctk.StringVar(value="🚀 Tự Động (Theo số lượng API Key)")
+        self.trans_concurrency_var.trace_add("write", lambda *args: (self.save_sync_config(silent=True), self.update_trans_estimate()))
+        self.trans_concurrency_combo = ctk.CTkComboBox(
+            self.frame_trans_top,
+            values=CONCURRENCY_OPTIONS,
+            variable=self.trans_concurrency_var,
+            width=220
+        )
+        self.trans_concurrency_combo.grid(row=0, column=6, padx=(2, 10), pady=5, sticky="w")
+
+        # Row 1 of top: Phong cách dịch + Quick style chips
+        self.frame_trans_style_row = ctk.CTkFrame(self.tab_trans, fg_color="transparent")
+        self.frame_trans_style_row.grid(row=1, column=0, padx=10, pady=(2, 4), sticky="ew")
+
+        ctk.CTkLabel(self.frame_trans_style_row, text="🎭 Phong Cách Dịch:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(5, 5))
+        self.trans_style_var = ctk.StringVar(value="")
+        self.trans_style_var.trace_add("write", lambda *args: self.save_sync_config(silent=True))
+        self.trans_style_entry = ctk.CTkEntry(self.frame_trans_style_row, textvariable=self.trans_style_var, placeholder_text="Để trống để AI tự đọc và suy luận (hoặc tự nhập: Vả mặt Zhihu, Cổ trang tiên hiệp, Hài hước...)")
+        self.trans_style_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self.btn_style_auto = ctk.CTkButton(self.frame_trans_style_row, text="✨ Tự Động AI", width=95, height=28, command=lambda: self.set_style_preset("✨ Tự Động AI (Auto)"))
+        self.btn_style_auto.pack(side="left", padx=2)
+        self.btn_style_zhihu = ctk.CTkButton(self.frame_trans_style_row, text="🎬 Phim Ngắn Zhihu", width=125, height=28, command=lambda: self.set_style_preset("🎬 Phim Ngắn Zhihu"))
+        self.btn_style_zhihu.pack(side="left", padx=2)
+        self.btn_style_lit = ctk.CTkButton(self.frame_trans_style_row, text="📖 Thuần Việt Văn Học", width=135, height=28, command=lambda: self.set_style_preset("📖 Thuần Việt Văn Học"))
+        self.btn_style_lit.pack(side="left", padx=2)
+        self.btn_style_ancient = ctk.CTkButton(self.frame_trans_style_row, text="⚔️ Cổ Trang Tiên Hiệp", width=135, height=28, command=lambda: self.set_style_preset("⚔️ Cổ Trang Tiên Hiệp"))
+        self.btn_style_ancient.pack(side="left", padx=2)
+        self.btn_style_funny = ctk.CTkButton(self.frame_trans_style_row, text="😂 Hài Hước", width=90, height=28, command=lambda: self.set_style_preset("😂 Hài Hước Bắt Trend"))
+        self.btn_style_funny.pack(side="left", padx=2)
+
+        # Row 2: Estimate & Strategy Banner
+        self.frame_trans_banner = ctk.CTkFrame(self.tab_trans, fg_color="#1e1e2d", corner_radius=6)
+        self.frame_trans_banner.grid(row=2, column=0, padx=10, pady=(0, 4), sticky="ew")
+
+        self.lbl_trans_badge = ctk.CTkLabel(self.frame_trans_banner, text="⚡ Smart Chunking: Gộp Chunk Lớn", font=ctk.CTkFont(size=12, weight="bold"), text_color="#38bdf8")
+        self.lbl_trans_badge.pack(side="left", padx=(10, 5), pady=4)
+
+        self.lbl_trans_estimate = ctk.CTkLabel(self.frame_trans_banner, text="Dùng Gemini: Tối thiểu hóa request • 0 dòng phụ đề • 0 từ", font=ctk.CTkFont(size=12), text_color="#94a3b8")
+        self.lbl_trans_estimate.pack(side="left", padx=5, pady=4)
+
+        # 3. Main 2-Column Area (Row 3)
+        self.frame_trans_main = ctk.CTkFrame(self.tab_trans, fg_color="transparent")
+        self.frame_trans_main.grid(row=3, column=0, padx=10, pady=4, sticky="nsew")
+        self.frame_trans_main.grid_columnconfigure(0, weight=1)
+        self.frame_trans_main.grid_columnconfigure(1, weight=1)
+        self.frame_trans_main.grid_rowconfigure(1, weight=1)
+
+        # Left: Source
+        self.frame_source_header = ctk.CTkFrame(self.frame_trans_main, fg_color="transparent")
+        self.frame_source_header.grid(row=0, column=0, padx=(0, 5), pady=(0, 5), sticky="ew")
+        ctk.CTkLabel(self.frame_source_header, text="CN / GB  Văn Bản Gốc (Raw / SRT):", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkButton(self.frame_source_header, text="Xóa", width=45, fg_color="#b23b3b", hover_color="#8f2b2b", command=self.clear_trans_source).pack(side="right", padx=2)
+        ctk.CTkButton(self.frame_source_header, text="📋 Dán Clipboard", width=110, command=self.paste_trans_source).pack(side="right", padx=2)
+        ctk.CTkButton(self.frame_source_header, text="📂 Chọn File (.SRT / .TXT)", width=150, command=self.select_trans_file).pack(side="right", padx=2)
+
+        self.trans_source_input = ctk.CTkTextbox(self.frame_trans_main, font=ctk.CTkFont(size=13))
+        self.trans_source_input.grid(row=1, column=0, padx=(0, 5), pady=0, sticky="nsew")
+        self.trans_source_input.bind("<KeyRelease>", lambda event: self.update_trans_estimate())
+
+        # Right: Result
+        self.frame_result_header = ctk.CTkFrame(self.frame_trans_main, fg_color="transparent")
+        self.frame_result_header.grid(row=0, column=1, padx=(5, 0), pady=(0, 5), sticky="ew")
+        ctk.CTkLabel(self.frame_result_header, text="VN  Bản Dịch Tiếng Việt:", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkButton(self.frame_result_header, text="Xóa", width=45, fg_color="#b23b3b", hover_color="#8f2b2b", command=self.clear_trans_result).pack(side="right", padx=2)
+        ctk.CTkButton(self.frame_result_header, text="📋 Copy", width=55, command=self.copy_trans_result).pack(side="right", padx=2)
+
+        self.trans_result_output = ctk.CTkTextbox(self.frame_trans_main, font=ctk.CTkFont(size=13))
+        self.trans_result_output.grid(row=1, column=1, padx=(5, 0), pady=0, sticky="nsew")
+
+        # 4. Actions and Export Bar (Row 4)
+        self.frame_trans_bottom = ctk.CTkFrame(self.tab_trans, fg_color="transparent")
+        self.frame_trans_bottom.grid(row=4, column=0, padx=10, pady=(4, 10), sticky="ew")
+        self.frame_trans_bottom.grid_columnconfigure(0, weight=1)
+
+        self.trans_progressbar = ctk.CTkProgressBar(self.frame_trans_bottom)
+        self.trans_progressbar.grid(row=0, column=0, columnspan=7, sticky="ew", pady=(0, 8))
+        self.trans_progressbar.set(0)
+
+        # Buttons row
+        self.frame_trans_btns = ctk.CTkFrame(self.frame_trans_bottom, fg_color="transparent")
+        self.frame_trans_btns.grid(row=1, column=0, columnspan=7, sticky="ew")
+
+        self.btn_start_trans = ctk.CTkButton(self.frame_trans_btns, text="⚡ Bắt đầu Dịch", font=ctk.CTkFont(size=15, weight="bold"), height=38, width=140, command=self.on_start_translate)
+        self.btn_start_trans.pack(side="left", padx=(0, 5))
+
+        self.btn_stop_trans = ctk.CTkButton(self.frame_trans_btns, text="⏹ Dừng", font=ctk.CTkFont(size=14, weight="bold"), height=38, width=70, fg_color="#b23b3b", hover_color="#8f2b2b", state="disabled", command=self.on_stop_translate)
+        self.btn_stop_trans.pack(side="left", padx=(0, 15))
+
+        ctk.CTkButton(self.frame_trans_btns, text="💾 Lưu SRT Việt", height=38, command=lambda: self.download_trans_srt("translated")).pack(side="left", padx=2)
+        ctk.CTkButton(self.frame_trans_btns, text="💾 Lưu SRT Song Ngữ", height=38, command=lambda: self.download_trans_srt("bilingual")).pack(side="left", padx=2)
+        ctk.CTkButton(self.frame_trans_btns, text="⬛ Lưu ASS Nền Đen", height=38, command=lambda: self.download_trans_ass("translated")).pack(side="left", padx=2)
+        ctk.CTkButton(self.frame_trans_btns, text="📝 Lưu TXT", height=38, command=self.download_trans_txt).pack(side="left", padx=2)
+
+        ctk.CTkButton(self.frame_trans_btns, text="➡️ Nạp vào Tab SRT", height=38, fg_color="#4f46e5", hover_color="#4338ca", command=self.send_trans_to_srt).pack(side="right", padx=2)
+        ctk.CTkButton(self.frame_trans_btns, text="➡️ Nạp vào Tab TTS", height=38, fg_color="#059669", hover_color="#047857", command=self.send_trans_to_tts).pack(side="right", padx=2)
 
         # -- 3. Advanced Settings (Collapsible) --
         self.btn_toggle_adv = ctk.CTkButton(self, text="[+] Hiển thị tuỳ chỉnh nâng cao", fg_color="transparent", text_color="gray", hover_color="#2a2d2e", command=self.toggle_adv_settings)
@@ -666,24 +843,13 @@ class CapCutTTSApp(ctk.CTk):
         self.val_aud_vol.trace_add("write", lambda *args: self.save_sync_config(silent=True))
         ctk.CTkEntry(self.frame_adv, textvariable=self.val_aud_vol, width=60).grid(row=0, column=3, padx=5, pady=5, sticky="w")
         
-        # Anti-ban group
-        self.frame_adv.grid_columnconfigure(5, weight=1)
-        ctk.CTkLabel(self.frame_adv, text="Nghỉ (s):").grid(row=1, column=0, padx=5, pady=5, sticky="e")
-        self.val_rest_time = ctk.StringVar(value="10")
-        self.val_rest_time.trace_add("write", lambda *args: self.save_sync_config(silent=True))
-        ctk.CTkEntry(self.frame_adv, textvariable=self.val_rest_time, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        
-        ctk.CTkLabel(self.frame_adv, text="sau (block):").grid(row=1, column=2, padx=5, pady=5, sticky="e")
-        self.val_rest_blocks = ctk.StringVar(value="300")
-        self.val_rest_blocks.trace_add("write", lambda *args: self.save_sync_config(silent=True))
-        ctk.CTkEntry(self.frame_adv, textvariable=self.val_rest_blocks, width=60).grid(row=1, column=3, padx=5, pady=5, sticky="w")
-        
-        ctk.CTkLabel(self.frame_adv, text="Đổi ID sau (block):").grid(row=1, column=4, padx=5, pady=5, sticky="e")
+        # Device ID Rotation
+        ctk.CTkLabel(self.frame_adv, text="Đổi ID sau (block):").grid(row=1, column=0, padx=5, pady=5, sticky="e")
         self.val_id_blocks = ctk.StringVar(value="300")
         self.val_id_blocks.trace_add("write", lambda *args: self.save_sync_config(silent=True))
-        ctk.CTkEntry(self.frame_adv, textvariable=self.val_id_blocks, width=60).grid(row=1, column=5, padx=5, pady=5, sticky="w")
+        ctk.CTkEntry(self.frame_adv, textvariable=self.val_id_blocks, width=60).grid(row=1, column=1, padx=5, pady=5, sticky="w")
         
-        ctk.CTkButton(self.frame_adv, text="Reset", width=60, fg_color="#b23b3b", hover_color="#8f2b2b", command=self.reset_adv_config).grid(row=1, column=6, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(self.frame_adv, text="Reset", width=60, fg_color="#b23b3b", hover_color="#8f2b2b", command=self.reset_adv_config).grid(row=1, column=2, padx=5, pady=5, sticky="w")
         
         # Watermark settings
         ctk.CTkFrame(self.frame_adv, height=2, fg_color="gray").grid(row=2, column=0, columnspan=7, sticky="ew", pady=10)
@@ -934,8 +1100,6 @@ class CapCutTTSApp(ctk.CTk):
                     if "val_min_video" in config: self.val_min_video.set(config["val_min_video"])
                     if "val_max_video" in config: self.val_max_video.set(config["val_max_video"])
                     if "val_max_audio" in config: self.val_max_audio.set(config["val_max_audio"])
-                    if "val_rest_time" in config: self.val_rest_time.set(config["val_rest_time"])
-                    if "val_rest_blocks" in config: self.val_rest_blocks.set(config["val_rest_blocks"])
                     if "val_id_blocks" in config: self.val_id_blocks.set(config["val_id_blocks"])
                     if "sync_mode" in config: self.combo_sync_mode_var.set(config["sync_mode"])
                     if "fixed_vid_speed" in config: self.val_fixed_vid_speed.set(config["fixed_vid_speed"])
@@ -951,9 +1115,35 @@ class CapCutTTSApp(ctk.CTk):
                     if "wm_y" in config: self.val_wm_y.set(config["wm_y"])
                     if "wm_scale" in config: self.val_wm_scale.set(config["wm_scale"])
                     
-                    if "val_threads" in config:
-                        self.slider_threads.set(config["val_threads"])
-                        self.label_threads_val.configure(text=f"{config['val_threads']}")
+                    if "threads_basic" in config:
+                        self.slider_threads_basic.set(config["threads_basic"])
+                        self.label_threads_basic_val.configure(text=f"{config['threads_basic']}")
+                    elif "val_threads" in config:
+                        self.slider_threads_basic.set(min(100, config["val_threads"]))
+                        self.label_threads_basic_val.configure(text=f"{min(100, config['val_threads'])}")
+                        
+                    if "threads_srt" in config:
+                        self.slider_threads_srt.set(config["threads_srt"])
+                        self.label_threads_srt_val.configure(text=f"{config['threads_srt']}")
+                    elif "val_threads" in config:
+                        self.slider_threads_srt.set(min(100, config["val_threads"]))
+                        self.label_threads_srt_val.configure(text=f"{min(100, config['val_threads'])}")
+                        
+                    if "threads_stt" in config:
+                        self.slider_threads_stt.set(config["threads_stt"])
+                        self.label_threads_stt_val.configure(text=f"{config['threads_stt']}")
+                        
+                    if "trans_api_keys" in config and hasattr(self, "trans_api_key_var"):
+                        self.trans_api_key_var.set(config["trans_api_keys"])
+                    if "trans_model" in config and hasattr(self, "trans_model_var"):
+                        self.trans_model_var.set(config["trans_model"])
+                    if "trans_style" in config and hasattr(self, "trans_style_var"):
+                        self.trans_style_var.set(config["trans_style"])
+                    if "trans_concurrency" in config and hasattr(self, "trans_concurrency_var"):
+                        self.trans_concurrency_var.set(config["trans_concurrency"])
+                        
+                    self.update_key_badge()
+                    self.update_trans_estimate()
         except Exception as e:
             print(f"Error loading config: {e}")
 
@@ -963,8 +1153,6 @@ class CapCutTTSApp(ctk.CTk):
                 "val_min_video": self.val_min_video.get(),
                 "val_max_video": self.val_max_video.get(),
                 "val_max_audio": self.val_max_audio.get(),
-                "val_rest_time": self.val_rest_time.get(),
-                "val_rest_blocks": self.val_rest_blocks.get(),
                 "val_id_blocks": self.val_id_blocks.get(),
                 "sync_mode": self.combo_sync_mode_var.get(),
                 "fixed_vid_speed": self.val_fixed_vid_speed.get(),
@@ -975,7 +1163,14 @@ class CapCutTTSApp(ctk.CTk):
                 "wm_path": self.val_wm_path.get(),
                 "wm_x": self.val_wm_x.get(),
                 "wm_y": self.val_wm_y.get(),
-                "wm_scale": self.val_wm_scale.get()
+                "wm_scale": self.val_wm_scale.get(),
+                "threads_basic": int(self.slider_threads_basic.get()),
+                "threads_srt": int(self.slider_threads_srt.get()),
+                "threads_stt": int(self.slider_threads_stt.get()),
+                "trans_api_keys": self.trans_api_key_var.get() if hasattr(self, "trans_api_key_var") else "",
+                "trans_model": self.trans_model_var.get() if hasattr(self, "trans_model_var") else "gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)",
+                "trans_style": self.trans_style_var.get() if hasattr(self, "trans_style_var") else "",
+                "trans_concurrency": self.trans_concurrency_var.get() if hasattr(self, "trans_concurrency_var") else "🚀 Tự Động (Theo số lượng API Key)",
             }
             with open("app_config.json", "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
@@ -995,8 +1190,6 @@ class CapCutTTSApp(ctk.CTk):
         self.toggle_sync_opts()
         
     def reset_adv_config(self):
-        self.val_rest_time.set("10")
-        self.val_rest_blocks.set("300")
         self.val_id_blocks.set("300")
         self.val_vid_vol.set("0")
         self.val_aud_vol.set("0")
@@ -1009,18 +1202,17 @@ class CapCutTTSApp(ctk.CTk):
     def update_rate_label(self, value):
         self.label_rate_val.configure(text=f"{value:.1f}")
         
-    def update_threads_label(self, value):
-        self.label_threads_val.configure(text=f"{int(value)}")
-        try:
-            config = {}
-            if os.path.exists("app_config.json"):
-                with open("app_config.json", "r", encoding="utf-8") as f:
-                    config = json.load(f)
-            config["val_threads"] = int(value)
-            with open("app_config.json", "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=4)
-        except:
-            pass
+    def update_threads_basic_label(self, value):
+        self.label_threads_basic_val.configure(text=f"{int(value)}")
+        self.save_sync_config(silent=True)
+
+    def update_threads_srt_label(self, value):
+        self.label_threads_srt_val.configure(text=f"{int(value)}")
+        self.save_sync_config(silent=True)
+
+    def update_threads_stt_label(self, value):
+        self.label_threads_stt_val.configure(text=f"{int(value)}")
+        self.save_sync_config(silent=True)
 
     def load_voices(self):
         try:
@@ -1210,7 +1402,7 @@ class CapCutTTSApp(ctk.CTk):
                         current = completed_count
                     self.after(0, lambda c=current, t=len(chunks): self.label_status.configure(text=f"Đã xử lý xong {c}/{t} đoạn âm thanh...", text_color="orange"))
                 
-                num_threads = min(len(chunks), int(self.slider_threads.get()) if hasattr(self, "slider_threads") else 10)
+                num_threads = min(len(chunks), int(self.slider_threads_basic.get()) if hasattr(self, "slider_threads_basic") else 20)
                 self.after(0, lambda: self.label_status.configure(text=f"Đang bắt đầu xử lý {len(chunks)} đoạn với {num_threads} luồng...", text_color="orange"))
                 
                 failed_chunks_info = []
@@ -1289,7 +1481,7 @@ class CapCutTTSApp(ctk.CTk):
         voice_type = self.get_selected_voice()
         rate = self.get_selected_rate()
         sync_mode = self.combo_sync_mode_var.get()
-        num_threads = int(self.slider_threads.get())
+        num_threads = int(self.slider_threads_srt.get()) if hasattr(self, "slider_threads_srt") else 50
         
         min_vid = 0.85
         max_vid = 1.15
@@ -1298,11 +1490,9 @@ class CapCutTTSApp(ctk.CTk):
         fixed_aud_speed = 1.0
         
         try:
-            val_rest_time = int(self.val_rest_time.get())
-            val_rest_blocks = int(self.val_rest_blocks.get())
             val_id_blocks = int(self.val_id_blocks.get())
         except ValueError:
-            messagebox.showwarning("Lỗi", "Vui lòng nhập số nguyên hợp lệ cho cấu hình chống ban.")
+            messagebox.showwarning("Lỗi", "Vui lòng nhập số nguyên hợp lệ cho cấu hình đổi ID.")
             return
 
         if sync_mode == "Khớp từng câu (Anti-Overlap)":
@@ -1325,9 +1515,9 @@ class CapCutTTSApp(ctk.CTk):
         self.btn_generate_srt.configure(state="disabled", text="Đang xử lý...")
         self.is_cancelled = False
         self.btn_stop.configure(state="normal")
-        threading.Thread(target=self.generate_srt_thread, args=(srt_file, json_file, voice_type, rate, sync_mode, min_vid, max_vid, max_aud, num_threads, val_rest_time, val_rest_blocks, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_speed), daemon=True).start()
+        threading.Thread(target=self.generate_srt_thread, args=(srt_file, json_file, voice_type, rate, sync_mode, min_vid, max_vid, max_aud, num_threads, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_speed), daemon=True).start()
         
-    def generate_srt_thread(self, srt_file, json_file, voice_type, rate, sync_mode, min_vid_spd, max_vid_spd, max_aud_spd, num_threads, val_rest_time, val_rest_blocks, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_speed):
+    def generate_srt_thread(self, srt_file, json_file, voice_type, rate, sync_mode, min_vid_spd, max_vid_spd, max_aud_spd, num_threads, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_speed):
         try:
             subs = pysrt.open(srt_file)
             total = len(subs)
@@ -1464,27 +1654,8 @@ class CapCutTTSApp(ctk.CTk):
                     self.after(0, lambda pv=progress_val: self.progressbar.set(pv))
                     self.after(0, lambda c=completed, t=total: self.label_progress.configure(text=f"Tiến độ: {c} / {t} câu"))
                     
-                    is_rest = False
-                    is_id_rotated = False
-                    
                     if val_id_blocks > 0 and completed % val_id_blocks == 0:
                         self.client.device.randomize()
-                        is_id_rotated = True
-                        
-                    if val_rest_blocks > 0 and completed % val_rest_blocks == 0:
-                        is_rest = True
-                    
-                    if is_rest and is_id_rotated:
-                        self.after(0, lambda c=completed: self.label_status.configure(text=f"Đã tạo {c} câu. Đổi ID và nghỉ {val_rest_time}s..."))
-                        for _ in range(int(val_rest_time * 10)):
-                            if self.is_cancelled: return None
-                            time.sleep(0.1)
-                    elif is_rest:
-                        self.after(0, lambda c=completed: self.label_status.configure(text=f"Đã tạo {c} câu. Nghỉ {val_rest_time}s chống block..."))
-                        for _ in range(int(val_rest_time * 10)):
-                            if self.is_cancelled: return None
-                            time.sleep(0.1)
-                    elif is_id_rotated:
                         self.after(0, lambda c=completed: self.label_status.configure(text=f"Đã tạo {c} câu. Vừa đổi Device ID mới!"))
                     else:
                         self.after(0, lambda txt=text: self.label_status.configure(text=f"Vừa tạo xong: {txt[:30]}..."))
@@ -1999,117 +2170,373 @@ class CapCutTTSApp(ctk.CTk):
         self.btn_generate_stt.configure(state="disabled", text="Đang xử lý...")
         self.is_cancelled = False
         self.btn_stop.configure(state="normal")
-        self.stt_progressbar.configure(mode="indeterminate")
-        self.stt_progressbar.start()
+        self.stt_progressbar.configure(mode="determinate")
+        self.stt_progressbar.set(0)
         
         threading.Thread(target=self.generate_stt_thread, args=(media_file, lang, use_trans, target_lang, out_srt), daemon=True).start()
         
     def generate_stt_thread(self, media_file, lang, use_trans, target_lang, out_srt):
-        temp_audio = None
         try:
-            import subprocess
-            ext = os.path.splitext(media_file)[1].lower()
-            upload_file = media_file
+            num_threads = int(self.slider_threads_stt.get()) if hasattr(self, "slider_threads_stt") else 3
             
-            if ext in ['.mp4', '.mov', '.avi', '.mkv']:
-                self.after(0, lambda: self.label_status.configure(text="Đang trích xuất âm thanh từ video (nhanh hơn)..."))
-                temp_audio = os.path.splitext(media_file)[0] + "_temp_audio.mp3"
-                try:
-                    subprocess.run(["ffmpeg", "-y", "-i", media_file, "-q:a", "0", "-map", "a", temp_audio], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    upload_file = temp_audio
-                except Exception as e:
-                    upload_file = media_file
+            def on_progress(p):
+                prog = p.get("progress", 0.0)
+                msg = p.get("message", "")
+                self.after(0, lambda pv=prog: self.stt_progressbar.set(pv))
+                self.after(0, lambda m=msg: self.label_status.configure(text=m, text_color="white"))
+                
+            def check_cancelled():
+                return self.is_cancelled
 
-            self.after(0, lambda: self.label_status.configure(text="Đang tải file lên CapCut... (với file lớn có thể mất vài phút)"))
-            
-            # Khởi tạo client cục bộ nếu cần hoặc dùng client chính
-            local_client = CapCutClient(device=self.client.device)
-            if self.is_cancelled: raise Exception("Đã huỷ bởi người dùng.")
-            
-            upload_res = local_client.upload_audio(upload_file)
-            
-            if temp_audio and os.path.exists(temp_audio):
-                try:
-                    os.remove(temp_audio)
-                except:
-                    pass
-            
-            self.after(0, lambda: self.label_status.configure(text="Tải lên thành công! Đang gửi yêu cầu STT..."))
-            
-            stt_task = local_client.create_stt_task(
-                audio_vid=upload_res.vid,
-                audio_md5=upload_res.md5,
-                duration_ms=upload_res.duration_ms or 10000,
+            self.after(0, lambda: self.stt_progressbar.set(0.02))
+            self.after(0, lambda: self.label_status.configure(text="Đang khởi tạo bộ nhận diện STT đa luồng...", text_color="white"))
+
+            # Chạy pipeline STT chia đoạn và đa luồng tối ưu từ truyen-ngan
+            subtitles = self.client.transcribe_large_media(
+                media_path=media_file,
                 language=lang,
                 translation_language=target_lang,
                 use_translation=use_trans,
+                chunk_duration_sec=600, # Phân đoạn 10 phút/đoạn
+                concurrency=num_threads,
+                progress_callback=on_progress,
+                cancel_check=check_cancelled
             )
-            
-            tasks = (stt_task.get("data") or {}).get("tasks") or []
-            if not tasks:
-                raise Exception("Không nhận được task từ API.")
-                
-            task_id = tasks[0]["id"]
-            token = tasks[0]["token"]
-            
-            timeout = 900.0 # 15 minutes timeout for large files
-            start_time = time.time()
-            stt_res = None
-            
-            while time.time() - start_time < timeout:
-                if self.is_cancelled:
-                    raise Exception("Đã huỷ bởi người dùng.")
-                elapsed = int(time.time() - start_time)
-                self.after(0, lambda e=elapsed: self.label_status.configure(text=f"Đang chờ server xử lý STT... (đã chờ {e}s)"))
-                
-                query_res = local_client.query_stt_task(task_id, token)
-                query_tasks = (query_res.get("data") or {}).get("tasks") or []
-                if query_tasks:
-                    status = query_tasks[0].get("status")
-                    if status in ("success", "succeed"):
-                        stt_res = query_res
-                        break
-                    elif status == "failed":
-                        raise Exception("Server CapCut báo lỗi xử lý thất bại (có thể file không chứa giọng nói hợp lệ).")
-                time.sleep(3.0)
-                
-            if not stt_res:
-                raise Exception(f"Quá thời gian chờ ({timeout} giây). Vui lòng cắt nhỏ file hoặc thử lại sau.")
-            
-            self.after(0, lambda: self.label_status.configure(text="Đang phân tích kết quả trả về..."))
-            
-            subtitles = local_client.extract_subtitles(stt_res)
-            
-            if not subtitles.utterances:
+
+            if not subtitles or not subtitles.utterances:
                 raise Exception("Không tìm thấy bất kỳ giọng nói nào trong file này (hoặc API trả về rỗng).")
-                
-            self.after(0, lambda: self.label_status.configure(text="Đang lưu file SRT..."))
+
+            self.after(0, lambda: self.label_status.configure(text="Đang lưu file phụ đề SRT..."))
             
-            subs = pysrt.SubRipFile()
-            for idx, ut in enumerate(subtitles.utterances, 1):
-                item = pysrt.SubRipItem(
-                    index=idx,
-                    start=pysrt.SubRipTime(milliseconds=ut.start_time),
-                    end=pysrt.SubRipTime(milliseconds=ut.end_time),
-                    text=ut.text
-                )
-                subs.append(item)
-                
-            subs.save(out_srt, encoding='utf-8')
+            # Lưu file SRT chuẩn
+            subtitles.save_srt(out_srt)
             
-            self.after(0, lambda: self.label_status.configure(text="Hoàn tất!", text_color="green"))
-            msg = f"Đã trích xuất SRT thành công!\nĐã lưu tại:\n{out_srt}"
+            self.after(0, lambda: self.stt_progressbar.set(1.0))
+            self.after(0, lambda: self.label_status.configure(text="Hoàn tất trích xuất phụ đề SRT!", text_color="green"))
+            msg = f"Đã trích xuất {len(subtitles.utterances)} câu phụ đề thành công!\nĐã lưu tại:\n{out_srt}"
             self.after(0, lambda m=msg: messagebox.showinfo("Thành công", m))
             
         except Exception as e:
             self.after(0, lambda e=e: self.label_status.configure(text=f"Lỗi: {e}", text_color="red"))
             self.after(0, lambda e=e: messagebox.showerror("Lỗi", f"Có lỗi xảy ra:\n{e}"))
         finally:
-            self.after(0, lambda: self.stt_progressbar.stop())
-            self.after(0, lambda: self.stt_progressbar.configure(mode="determinate"))
             self.after(0, lambda: self.stt_progressbar.set(0))
             self.after(0, lambda: self.btn_generate_stt.configure(state="normal", text="Bắt đầu trích xuất SRT"))
             self.after(0, lambda: self.btn_stop.configure(state="disabled"))
+
+    # =========================================================================
+    # TAB 5: DỊCH THUẬT (AI) METHODS
+    # =========================================================================
+
+    def set_style_preset(self, preset_name):
+        preset_val = STYLE_PRESETS.get(preset_name, "")
+        self.trans_style_var.set(preset_val)
+        self.save_sync_config(silent=True)
+
+    def update_trans_estimate(self):
+        if not hasattr(self, "trans_source_input") or not hasattr(self, "lbl_trans_estimate"):
+            return
+        text = self.trans_source_input.get("1.0", "end-1c").strip()
+        model = self.trans_model_var.get() if hasattr(self, "trans_model_var") else "gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)"
+        concurrency_str = self.trans_concurrency_var.get() if hasattr(self, "trans_concurrency_var") else "auto"
+        api_keys_str = self.trans_api_key_var.get() if hasattr(self, "trans_api_key_var") else ""
+        keys = [k.strip() for k in re.split(r"[,;\n\r]+", api_keys_str) if k.strip()]
+        num_threads = parse_concurrency_val(concurrency_str, len(keys))
+
+        is_srt = is_srt_content(text)
+        is_gemma = "gemma" in model.lower()
+
+        if is_gemma:
+            self.lbl_trans_badge.configure(text="🛡️ Smart Chunking: Băm Nhỏ An Toàn 16k TPM (Gemma)", text_color="#f59e0b")
+        else:
+            self.lbl_trans_badge.configure(text="⚡ Smart Chunking: Gộp Chunk Lớn (Gemini)", text_color="#38bdf8")
+
+        if not text:
+            self.lbl_trans_estimate.configure(text="Dùng Gemini: Tối thiểu hóa request (Ước tính tốn 1 Request duy nhất) • 0 dòng phụ đề • 0 từ")
+            return
+
+        if is_srt:
+            items = parse_srt(text)
+            total_lines = len(items)
+            total_words = sum(count_units(it.original_text) for it in items)
+            chunks, config = chunk_srt_items(items, model)
+            req_count = len(chunks)
+            est_sec = max(2, math.ceil((req_count * 3.8) / num_threads))
+            self.lbl_trans_estimate.configure(
+                text=f"{req_count} Request (~{est_sec}s hoàn thành • {num_threads} Luồng Song Song • {config['chunk_size']} dòng/đoạn) • {total_lines} dòng phụ đề • ~{total_words} từ"
+            )
+        else:
+            total_words = count_units(text)
+            total_chars = len(text)
+            chunks, config = chunk_raw_text(text, model)
+            req_count = len(chunks)
+            est_sec = max(3, math.ceil((req_count * 4.0) / num_threads))
+            self.lbl_trans_estimate.configure(
+                text=f"{req_count} Request (~{est_sec}s hoàn thành • {num_threads} Luồng Song Song • {config['chunk_size']} chữ/đoạn) • ~{total_words} chữ • {total_chars} ký tự"
+            )
+
+    def update_key_badge(self):
+        if hasattr(self, "lbl_key_badge") and hasattr(self, "trans_api_key_var"):
+            raw = self.trans_api_key_var.get().strip()
+            keys = [k.strip() for k in re.split(r"[,;\n\r\t]+", raw) if k.strip()]
+            self.lbl_key_badge.configure(text=f"({len(keys)} Key)")
+
+    def open_api_key_manager(self):
+        def on_keys_saved(new_keys_str):
+            self.trans_api_key_var.set(new_keys_str)
+            self.save_sync_config(silent=True)
+            self.update_key_badge()
+            self.update_trans_estimate()
+            messagebox.showinfo("Thành công", "Đã lưu danh sách API Keys thành công!")
+
+        current_keys = self.trans_api_key_var.get()
+        ApiKeyManagerDialog(self, initial_keys_str=current_keys, on_save_callback=on_keys_saved)
+
+    def select_trans_file(self):
+        file_path = filedialog.askopenfilename(
+            title="Chọn file SRT hoặc file văn bản TXT",
+            filetypes=[("Phụ đề & Văn bản", "*.srt *.txt *.vtt"), ("Tất cả files", "*.*")]
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            self.trans_source_input.delete("1.0", "end")
+            self.trans_source_input.insert("1.0", content)
+            self.update_trans_estimate()
+            self.label_status.configure(text=f"Đã mở file: {os.path.basename(file_path)}", text_color="white")
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể đọc file: {e}")
+
+    def paste_trans_source(self):
+        try:
+            text = self.clipboard_get()
+            if text:
+                self.trans_source_input.insert("end", text)
+                self.update_trans_estimate()
+        except Exception:
+            pass
+
+    def clear_trans_source(self):
+        self.trans_source_input.delete("1.0", "end")
+        self.update_trans_estimate()
+
+    def copy_trans_result(self):
+        text = self.trans_result_output.get("1.0", "end-1c")
+        if text.strip():
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            messagebox.showinfo("Thông báo", "Đã sao chép toàn bộ bản dịch vào bộ nhớ tạm!")
+
+    def clear_trans_result(self):
+        self.trans_result_output.delete("1.0", "end")
+
+    def on_stop_translate(self):
+        self.is_cancelled = True
+        self.label_status.configure(text="Đang dừng quá trình dịch...", text_color="orange")
+
+    def on_start_translate(self):
+        source_text = self.trans_source_input.get("1.0", "end-1c").strip()
+        if not source_text:
+            messagebox.showwarning("Cảnh báo", "Vui lòng nhập văn bản hoặc chọn file SRT cần dịch!")
+            return
+
+        api_keys_str = self.trans_api_key_var.get().strip()
+        if not api_keys_str:
+            messagebox.showwarning("Cảnh báo", "Vui lòng nhập Gemini API Key để dịch thuật!\n(Có thể lấy miễn phí tại aistudio.google.com)")
+            return
+
+        model = self.trans_model_var.get()
+        style = self.trans_style_var.get()
+        concurrency = self.trans_concurrency_var.get() if hasattr(self, "trans_concurrency_var") else "auto"
+
+        self.btn_start_trans.configure(state="disabled", text="Đang dịch...")
+        self.btn_stop_trans.configure(state="normal")
+        self.is_cancelled = False
+        self.trans_progressbar.set(0)
+        self.trans_result_output.delete("1.0", "end")
+
+        threading.Thread(
+            target=self.translate_worker_thread,
+            args=(source_text, api_keys_str, model, style, concurrency),
+            daemon=True
+        ).start()
+
+    def translate_worker_thread(self, source_text, api_keys_str, model, style, concurrency):
+        try:
+            translator = GeminiTranslator(api_keys=api_keys_str, model=model)
+            is_srt = is_srt_content(source_text)
+
+            def on_progress(p):
+                prog = p.get("progress", 0.0)
+                msg = p.get("message", "")
+                acc = p.get("accumulated_text", "")
+                self.after(0, lambda pv=prog: self.trans_progressbar.set(pv))
+                self.after(0, lambda m=msg: self.label_status.configure(text=m, text_color="white"))
+                if acc:
+                    self.after(0, lambda t=acc: self._update_trans_result(t))
+
+            def check_cancelled():
+                return self.is_cancelled
+
+            self.after(0, lambda: self.label_status.configure(text="Đang phân tích và chia đoạn nội dung...", text_color="white"))
+
+            if is_srt:
+                parsed_items = parse_srt(source_text)
+                if not parsed_items:
+                    raise Exception("Không thể nhận diện các khối phụ đề SRT hợp lệ.")
+                
+                self.after(0, lambda n=len(parsed_items): self.label_status.configure(
+                    text=f"Đã nhận diện {n} câu phụ đề SRT. Bắt đầu dịch đa luồng...",
+                    text_color="white"
+                ))
+
+                translated_items = translator.translate_srt(
+                    srt_content_or_items=parsed_items,
+                    style=style,
+                    concurrency=concurrency,
+                    progress_callback=on_progress,
+                    cancel_check=check_cancelled
+                )
+                self.last_translated_srt_items = translated_items
+                final_text = build_srt(translated_items, mode="translated")
+            else:
+                self.last_translated_srt_items = None
+                final_text = translator.translate_text(
+                    raw_text=source_text,
+                    style=style,
+                    concurrency=concurrency,
+                    progress_callback=on_progress,
+                    cancel_check=check_cancelled
+                )
+
+            self.after(0, lambda t=final_text: self._update_trans_result(t))
+            self.after(0, lambda: self.trans_progressbar.set(1.0))
+            self.after(0, lambda: self.label_status.configure(text="🎉 Đã dịch hoàn tất 100%!", text_color="green"))
+            self.after(0, lambda: messagebox.showinfo("Thành công", "Đã dịch hoàn tất toàn bộ nội dung!"))
+
+        except Exception as e:
+            self.after(0, lambda e=e: self.label_status.configure(text=f"Lỗi: {e}", text_color="red"))
+            self.after(0, lambda e=e: messagebox.showerror("Lỗi dịch thuật", f"Có lỗi xảy ra trong quá trình dịch:\n{e}"))
+        finally:
+            self.after(0, lambda: self.btn_start_trans.configure(state="normal", text="⚡ Bắt đầu Dịch"))
+            self.after(0, lambda: self.btn_stop_trans.configure(state="disabled"))
+
+    def _update_trans_result(self, text):
+        self.trans_result_output.delete("1.0", "end")
+        self.trans_result_output.insert("1.0", text)
+
+    def download_trans_srt(self, mode="translated"):
+        text = self.trans_result_output.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showwarning("Cảnh báo", "Chưa có nội dung bản dịch để lưu!")
+            return
+
+        if hasattr(self, "last_translated_srt_items") and self.last_translated_srt_items:
+            content = build_srt(self.last_translated_srt_items, mode=mode)
+        else:
+            if not is_srt_content(text):
+                messagebox.showwarning("Cảnh báo", "Bản dịch hiện tại không phải định dạng SRT. Vui lòng chọn 'Lưu TXT'!")
+                return
+            content = text
+
+        suffix = "_bilingual.srt" if mode == "bilingual" else "_vi.srt"
+        out_file = filedialog.asksaveasfilename(
+            title="Lưu file phụ đề SRT",
+            defaultextension=".srt",
+            initialfile=f"subtitles{suffix}",
+            filetypes=[("SRT Subtitles", "*.srt")]
+        )
+        if out_file:
+            with open(out_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            messagebox.showinfo("Thành công", f"Đã lưu file SRT tại:\n{out_file}")
+
+    def download_trans_ass(self, mode="translated"):
+        text = self.trans_result_output.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showwarning("Cảnh báo", "Chưa có nội dung bản dịch để lưu!")
+            return
+
+        if hasattr(self, "last_translated_srt_items") and self.last_translated_srt_items:
+            content = build_ass(self.last_translated_srt_items, mode=mode)
+        else:
+            items = parse_srt(text)
+            if not items:
+                messagebox.showwarning("Cảnh báo", "Không thể tạo file ASS từ văn bản này (cần định dạng phụ đề SRT có timestamp)!")
+                return
+            content = build_ass(items, mode=mode)
+
+        out_file = filedialog.asksaveasfilename(
+            title="Lưu file phụ đề .ASS nền đen che sub gốc",
+            defaultextension=".ass",
+            initialfile="subtitles_blackbox.ass",
+            filetypes=[("Advanced SubStation Alpha", "*.ass")]
+        )
+        if out_file:
+            with open(out_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            messagebox.showinfo("Thành công", f"Đã lưu file ASS nền đen che sub gốc tại:\n{out_file}")
+
+    def download_trans_txt(self):
+        text = self.trans_result_output.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showwarning("Cảnh báo", "Chưa có nội dung bản dịch để lưu!")
+            return
+
+        out_file = filedialog.asksaveasfilename(
+            title="Lưu file văn bản dịch (.txt)",
+            defaultextension=".txt",
+            initialfile="ban_dich.txt",
+            filetypes=[("Text Files", "*.txt")]
+        )
+        if out_file:
+            with open(out_file, "w", encoding="utf-8") as f:
+                f.write(text)
+            messagebox.showinfo("Thành công", f"Đã lưu file TXT tại:\n{out_file}")
+
+    def send_trans_to_tts(self):
+        text = self.trans_result_output.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showwarning("Cảnh báo", "Chưa có bản dịch nào để nạp sang Tab TTS!")
+            return
+
+        # Clean SRT formatting if user translates SRT but wants TTS
+        if is_srt_content(text):
+            items = parse_srt(text)
+            plain_text = "\n\n".join([it.original_text for it in items if it.original_text])
+        else:
+            plain_text = text
+
+        self.text_input.delete("1.0", "end")
+        self.text_input.insert("1.0", plain_text)
+        self.tabview.set("Tạo TTS Cơ Bản")
+        messagebox.showinfo("Thành công", "Đã nạp toàn bộ văn bản dịch sang Tab 'Tạo TTS Cơ Bản' để tạo giọng đọc!")
+
+    def send_trans_to_srt(self):
+        import tempfile
+        text = self.trans_result_output.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showwarning("Cảnh báo", "Chưa có bản dịch nào để nạp sang Tab SRT!")
+            return
+
+        if not is_srt_content(text) and not (hasattr(self, "last_translated_srt_items") and self.last_translated_srt_items):
+            messagebox.showwarning("Cảnh báo", "Bản dịch hiện tại là văn bản thông thường, không phải file SRT có timecode!\nVui lòng chọn 'Nạp vào Tab TTS'.")
+            return
+
+        if hasattr(self, "last_translated_srt_items") and self.last_translated_srt_items:
+            srt_str = build_srt(self.last_translated_srt_items, mode="translated")
+        else:
+            srt_str = text
+
+        temp_srt_path = os.path.join(tempfile.gettempdir(), f"translated_srt_{int(time.time())}.srt")
+        with open(temp_srt_path, "w", encoding="utf-8") as f:
+            f.write(srt_str)
+
+        self.srt_path.set(temp_srt_path)
+        self.tabview.set("Chèn SRT vào CapCut")
+        messagebox.showinfo("Thành công", f"Đã nạp file phụ đề dịch sang Tab 'Chèn SRT vào CapCut'!\nĐường dẫn tạm:\n{temp_srt_path}")
 
 if __name__ == "__main__":
     app = CapCutTTSApp()
