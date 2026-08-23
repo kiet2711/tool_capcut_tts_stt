@@ -1806,7 +1806,8 @@ class CapCutTTSApp(ctk.CTk):
                         generate_fn=generate_single_item,
                         on_proceed_callback=on_dialog_proceed,
                         on_cancel_callback=on_dialog_cancel,
-                        initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị lỗi CapCut cần xử lý.")]
+                        initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị lỗi CapCut cần xử lý.")],
+                        threads_count=int(self.slider_threads_srt.get()) if hasattr(self, 'slider_threads_srt') else 10
                     )
 
                 self.after(0, show_dialog)
@@ -1892,9 +1893,10 @@ class CapCutTTSApp(ctk.CTk):
             
             self.after(0, lambda: self.label_status.configure(text="Hoàn tất!", text_color="green"))
             
+            actual_skipped = [item for item in final_audio_info if item.get("is_dummy") or not item.get("path")]
             msg = f"Đã chèn âm thanh thành công!\nVui lòng tải lại dự án trên CapCut."
-            if missing_indices:
-                msg += f"\n\n(Đã bỏ qua {len(missing_indices)} câu lỗi không có âm thanh)"
+            if actual_skipped:
+                msg += f"\n\n(Đã bỏ qua {len(actual_skipped)} câu lỗi không có âm thanh)"
             if reports:
                 msg += f"\n\nLưu ý: Có {len(reports)} câu dịch quá dài không thể ép vừa khớp tốc độ. Đã lưu báo cáo tại overlap_report.json"
             self.after(0, lambda m=msg: messagebox.showinfo("Thành công", m))
@@ -2093,7 +2095,8 @@ class CapCutTTSApp(ctk.CTk):
             generate_fn=generate_single_item,
             on_proceed_callback=on_proceed_tab2,
             on_cancel_callback=None,
-            initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị thiếu / lỗi cần xử lý.")]
+            initial_logs=[("TTS_NEEDS_REVIEW", f"Có {len(missing_items)} câu bị thiếu / lỗi cần xử lý.")],
+            threads_count=int(self.slider_threads_srt.get()) if hasattr(self, 'slider_threads_srt') else 10
         )
 
 

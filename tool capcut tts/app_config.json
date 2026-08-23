@@ -14,7 +14,7 @@
     "wm_y": "200",
     "wm_scale": "37",
     "threads_basic": 20,
-    "threads_srt": 54,
+    "threads_srt": 100,
     "threads_stt": 7,
     "trans_api_keys": "",
     "trans_model": "gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)",
