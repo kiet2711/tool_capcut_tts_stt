@@ -494,7 +494,7 @@ class CapCutTTSApp(ctk.CTk):
         self.label_voice = ctk.CTkLabel(self.frame_top, text="Chọn Giọng Đọc:", font=ctk.CTkFont(weight="bold"))
         self.label_voice.grid(row=0, column=0, padx=10, pady=10, sticky="w")
         
-        self.combo_voice = ctk.CTkComboBox(self.frame_top, values=["Đang tải..."], width=220)
+        self.combo_voice = ctk.CTkComboBox(self.frame_top, values=["Đang tải..."], width=220, command=self.on_voice_changed)
         self.combo_voice.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         
         self.label_rate = ctk.CTkLabel(self.frame_top, text="Tốc độ:", font=ctk.CTkFont(weight="bold"))
@@ -1097,6 +1097,7 @@ class CapCutTTSApp(ctk.CTk):
             if os.path.exists("app_config.json"):
                 with open("app_config.json", "r", encoding="utf-8") as f:
                     config = json.load(f)
+                    if "selected_voice" in config: self.saved_voice = config["selected_voice"]
                     if "val_min_video" in config: self.val_min_video.set(config["val_min_video"])
                     if "val_max_video" in config: self.val_max_video.set(config["val_max_video"])
                     if "val_max_audio" in config: self.val_max_audio.set(config["val_max_audio"])
@@ -1149,7 +1150,12 @@ class CapCutTTSApp(ctk.CTk):
 
     def save_sync_config(self, silent=False):
         try:
+            current_voice = self.combo_voice.get() if hasattr(self, "combo_voice") else getattr(self, "saved_voice", "Cô Gái Hoạt Ngôn (BV074_streaming)")
+            if current_voice == "Đang tải..." or current_voice.startswith("Lỗi:"):
+                current_voice = getattr(self, "saved_voice", "Cô Gái Hoạt Ngôn (BV074_streaming)")
+                
             config = {
+                "selected_voice": current_voice,
                 "val_min_video": self.val_min_video.get(),
                 "val_max_video": self.val_max_video.get(),
                 "val_max_audio": self.val_max_audio.get(),
@@ -1214,6 +1220,12 @@ class CapCutTTSApp(ctk.CTk):
         self.label_threads_stt_val.configure(text=f"{int(value)}")
         self.save_sync_config(silent=True)
 
+    def on_voice_changed(self, choice=None):
+        val = self.combo_voice.get()
+        if val and val != "Đang tải..." and not val.startswith("Lỗi:"):
+            self.saved_voice = val
+            self.save_sync_config(silent=True)
+
     def load_voices(self):
         try:
             voices = self.client.list_voices(lang="vi-VN")
@@ -1229,11 +1241,19 @@ class CapCutTTSApp(ctk.CTk):
                 
             self.after(0, lambda: self.combo_voice.configure(values=voice_names))
             if voice_names:
-                default_voice = voice_names[0]
-                for vname in voice_names:
-                    if "cô gái hoạt ngôn" in vname.lower() or "bv074_streaming" in vname.lower():
-                        default_voice = vname
-                        break
+                default_voice = None
+                saved = getattr(self, "saved_voice", None)
+                if saved and saved in voice_names:
+                    default_voice = saved
+                else:
+                    for vname in voice_names:
+                        # Prioritize exact "Cô Gái Hoạt Ngôn (BV074_streaming)" (not "BV074_streaming_dsp")
+                        if "(bv074_streaming)" in vname.lower() or ("cô gái hoạt ngôn" in vname.lower() and "dsp" not in vname.lower()):
+                            default_voice = vname
+                            break
+                    if not default_voice:
+                        default_voice = voice_names[0]
+                self.saved_voice = default_voice
                 self.after(0, lambda: self.combo_voice.set(default_voice))
         except Exception as e:
             err_msg = [f"Lỗi: {str(e)[:50]}..."]
