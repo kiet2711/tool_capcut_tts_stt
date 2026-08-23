@@ -254,10 +254,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def is_srt_content(text: str) -> bool:
-    """Check if string has SRT subtitle format."""
+    """Check if string has SRT subtitle format (supports flexible formats like 0:0:1,000 or 00:00:01,000)."""
     if not text or not isinstance(text, str):
         return False
-    return bool(re.search(r"\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3}", text))
+    return bool(re.search(r"\d{1,2}:\d{1,2}:\d{1,2}(?:[,\.]\d{1,3})?\s*-->\s*\d{1,2}:\d{1,2}:\d{1,2}(?:[,\.]\d{1,3})?", text))
 
 
 def count_units(text: str) -> int:
