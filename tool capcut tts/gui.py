@@ -52,7 +52,7 @@ def format_edge_tts_rate(rate_float):
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
 
-def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp từng câu (Anti-Overlap)", adv_settings=None, fixed_vid_speed=1.0, fixed_aud_speed=1.0):
+def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp từng câu (Anti-Overlap)", adv_settings=None, fixed_vid_speed=1.0, fixed_aud_min_speed=0.8, fixed_aud_max_speed=1.5):
     """
     audio_info_list: list of dicts like:
     {
@@ -76,22 +76,8 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
         
     tracks = draft.get("tracks", [])
     
-    if sync_mode in ["Đổi tốc độ toàn bộ (Fixed Speed)", "Đổi tốc độ toàn bộ (dùng cấu hình Tab 2)"]:
-        for track in tracks:
-            for seg in track.get("segments", []):
-                if "target_timerange" in seg:
-                    seg["target_timerange"]["start"] = int(seg["target_timerange"]["start"] / fixed_vid_speed)
-                    seg["target_timerange"]["duration"] = int(seg["target_timerange"]["duration"] / fixed_vid_speed)
-                
-                if track.get("type") in ["video", "audio"]:
-                    speed_id = str(uuid.uuid4()).upper()
-                    materials["speeds"].append({
-                        "id": speed_id, "type": "speed", "mode": 0, "speed": fixed_vid_speed, "curve_speed": None
-                    })
-                    if "extra_material_refs" not in seg:
-                        seg["extra_material_refs"] = []
-                    seg["extra_material_refs"].append(speed_id)
-                    seg["speed"] = fixed_vid_speed
+    fixed_speed_modes = ["Đổi tốc độ toàn bộ (Fixed Speed)", "Đổi tốc độ toàn bộ (dùng cấu hình Tab 2)"]
+    anti_overlap_modes = ["Khớp từng câu (Anti-Overlap)", "Khớp từng câu (dùng cấu hình Tab 2)"]
 
     
     text_track = None
@@ -111,7 +97,7 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
         for t_seg in text_track["segments"]:
             t_seg["_orig_start"] = t_seg.get("target_timerange", {}).get("start", 0)
 
-    if sync_mode in ["Khớp từng câu (Anti-Overlap)", "Khớp từng câu (dùng cấu hình Tab 2)"]:
+    if sync_mode in anti_overlap_modes + fixed_speed_modes:
         video_track = None
         video_segment = None
         for track in tracks:
@@ -127,6 +113,16 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
         new_video_segments = []
         current_target_time = 0
         current_source_time = video_segment["source_timerange"]["start"]
+        existing_speed_ids = {
+            item.get("id") for item in materials["speeds"] if item.get("id")
+        }
+        # Effects, filters, adjustments and animations are referenced from the
+        # segment through extra_material_refs.  Preserve those refs when a
+        # segment is split; only the old speed ref must be replaced.
+        preserved_video_material_refs = [
+            ref for ref in video_segment.get("extra_material_refs", [])
+            if ref not in existing_speed_ids
+        ]
         
         import copy
         
@@ -150,12 +146,35 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
                 "id": speed_id, "type": "speed", "mode": 0, "speed": speed, "curve_speed": None
             })
             
-            seg_clone["extra_material_refs"] = [speed_id]
+            seg_clone["extra_material_refs"] = preserved_video_material_refs + [speed_id]
             seg_clone["speed"] = speed
             
             current_target_time += target_duration
             current_source_time += duration
             return seg_clone
+
+        # Fixed Speed is deliberately sparse: consecutive normal portions stay
+        # in one segment.  A new video segment is created only for a sentence
+        # whose audio exceeds the configured maximum speed.
+        fixed_pending_start = None
+        fixed_pending_duration = 0
+
+        def add_fixed_normal(source_start, duration):
+            nonlocal fixed_pending_start, fixed_pending_duration
+            if duration <= 0:
+                return
+            if fixed_pending_start is None:
+                fixed_pending_start = source_start
+            fixed_pending_duration += duration
+
+        def flush_fixed_normal():
+            nonlocal fixed_pending_start, fixed_pending_duration
+            if fixed_pending_duration > 0:
+                chunk = create_video_chunk(fixed_pending_start, fixed_pending_duration, 1.0)
+                if chunk:
+                    new_video_segments.append(chunk)
+            fixed_pending_start = None
+            fixed_pending_duration = 0
 
     new_audio_track_id = str(uuid.uuid4()).upper()
     new_audio_track = {
@@ -173,15 +192,41 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
         is_dummy = info.get("is_dummy", False)
         
         audio_speed_val = 1.0
-        if sync_mode in ["Đổi tốc độ toàn bộ (Fixed Speed)", "Đổi tốc độ toàn bộ (dùng cấu hình Tab 2)"]:
-            block_target_start = int(srt_start / fixed_vid_speed)
-            audio_speed_val = fixed_aud_speed
-            audio_target_duration = int(audio_duration_micros / fixed_aud_speed)
+        sync_target_duration = srt_end - srt_start
+        if sync_mode in fixed_speed_modes:
+            block_source_duration = srt_end - srt_start
+            source_at_block = current_source_time + fixed_pending_duration
+            gap_duration = srt_start - source_at_block
+            if gap_duration > 0:
+                add_fixed_normal(source_at_block, gap_duration)
+                source_at_block += gap_duration
+
+            requested_audio_speed = audio_duration_micros / block_source_duration if block_source_duration > 0 else 1.0
+            if requested_audio_speed > fixed_aud_max_speed:
+                # Audio is still too long at its fastest permitted speed.  Keep
+                # audio at that limit and slow only this matching video portion.
+                audio_speed_val = fixed_aud_max_speed
+                audio_target_duration = int(audio_duration_micros / audio_speed_val)
+                flush_fixed_normal()
+                block_target_start = current_target_time
+                video_speed = block_source_duration / audio_target_duration if audio_target_duration > 0 else 1.0
+                chunk = create_video_chunk(current_source_time, block_source_duration, video_speed)
+                if chunk:
+                    new_video_segments.append(chunk)
+                sync_target_duration = audio_target_duration
+            else:
+                # Short audio is left untouched, as requested.  Otherwise use
+                # only the needed audio acceleration and keep video unchanged.
+                if requested_audio_speed > 1.0:
+                    audio_speed_val = max(fixed_aud_min_speed, requested_audio_speed)
+                audio_target_duration = int(audio_duration_micros / audio_speed_val)
+                block_target_start = current_target_time + fixed_pending_duration
+                add_fixed_normal(source_at_block, block_source_duration)
         else:
             block_target_start = srt_start
             audio_target_duration = audio_duration_micros
             
-        if sync_mode in ["Khớp từng câu (Anti-Overlap)", "Khớp từng câu (dùng cấu hình Tab 2)"]:
+        if sync_mode in anti_overlap_modes:
             gap_duration = srt_start - current_source_time
             if gap_duration > 0:
                 chunk = create_video_chunk(current_source_time, gap_duration, 1.0)
@@ -195,7 +240,7 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
             if chunk:
                 new_video_segments.append(chunk)
             
-        if text_track and sync_mode in ["Khớp từng câu (Anti-Overlap)", "Khớp từng câu (dùng cấu hình Tab 2)"]:
+        if text_track and sync_mode in anti_overlap_modes + fixed_speed_modes:
             srt_start = info["start"]
             text_seg = None
             min_diff = float('inf')
@@ -212,9 +257,9 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
             if text_seg:
                 if text_seg.get("target_timerange") is not None:
                     text_seg["target_timerange"]["start"] = block_target_start
-                    text_seg["target_timerange"]["duration"] = audio_duration_micros
+                    text_seg["target_timerange"]["duration"] = audio_duration_micros if sync_mode in anti_overlap_modes else sync_target_duration
                 if text_seg.get("source_timerange") is not None:
-                    text_seg["source_timerange"]["duration"] = audio_duration_micros
+                    text_seg["source_timerange"]["duration"] = audio_duration_micros if sync_mode in anti_overlap_modes else sync_target_duration
                 
         if is_dummy:
             continue
@@ -251,7 +296,9 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
             "visible": True, "render_timerange": {"duration": 0, "start": 0}
         })
         
-    if sync_mode in ["Khớp từng câu (Anti-Overlap)", "Khớp từng câu (dùng cấu hình Tab 2)"]:
+    if sync_mode in anti_overlap_modes + fixed_speed_modes:
+        if sync_mode in fixed_speed_modes:
+            flush_fixed_normal()
         final_video_duration = video_segment["source_timerange"]["start"] + video_segment["source_timerange"]["duration"]
         if current_source_time < final_video_duration:
             chunk = create_video_chunk(current_source_time, final_video_duration - current_source_time, 1.0)
@@ -570,14 +617,15 @@ class CapCutTTSApp(ctk.CTk):
         self.combo_sync_mode_var = ctk.StringVar(value="Khớp từng câu (Anti-Overlap)")
         self.combo_sync_mode_var.trace_add("write", lambda *args: self.save_sync_config(silent=True))
         self.combo_sync_mode = ctk.CTkComboBox(self.frame_srt_row4, values=["Không đồng bộ", "Khớp từng câu (Anti-Overlap)", "Đổi tốc độ toàn bộ (Fixed Speed)"], variable=self.combo_sync_mode_var, command=self.toggle_sync_opts, width=240)
-        self.combo_sync_mode.grid(row=0, column=1, padx=(0, 20), sticky="w")
+        self.combo_sync_mode.grid(row=0, column=1, padx=(0, 6), sticky="w")
+        ctk.CTkButton(self.frame_srt_row4, text="? Hướng dẫn", width=95, command=self.show_sync_mode_guide).grid(row=0, column=2, padx=(0, 14), sticky="w")
         
-        ctk.CTkLabel(self.frame_srt_row4, text="Số luồng (1-100):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=2, padx=(0, 5), sticky="w")
+        ctk.CTkLabel(self.frame_srt_row4, text="Số luồng (1-100):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=3, padx=(0, 5), sticky="w")
         self.slider_threads_srt = ctk.CTkSlider(self.frame_srt_row4, from_=1, to=100, number_of_steps=99, command=self.update_threads_srt_label, width=120)
         self.slider_threads_srt.set(50)
-        self.slider_threads_srt.grid(row=0, column=3, padx=5, sticky="w")
+        self.slider_threads_srt.grid(row=0, column=4, padx=5, sticky="w")
         self.label_threads_srt_val = ctk.CTkLabel(self.frame_srt_row4, text="50", font=ctk.CTkFont(weight="bold"))
-        self.label_threads_srt_val.grid(row=0, column=4, padx=5, sticky="w")
+        self.label_threads_srt_val.grid(row=0, column=5, padx=5, sticky="w")
         
         self.frame_sync_opts = ctk.CTkFrame(self.tab_srt)
         self.frame_sync_opts.grid(row=5, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
@@ -585,15 +633,19 @@ class CapCutTTSApp(ctk.CTk):
         self.frame_fixed_speed_opts = ctk.CTkFrame(self.tab_srt)
         # Not gridded by default
         
-        ctk.CTkLabel(self.frame_fixed_speed_opts, text="Tốc độ Video (x):").grid(row=0, column=0, padx=5, pady=5)
+        # Kept only for loading older app_config.json files.  Fixed Speed no
+        # longer applies one speed to the complete video timeline.
         self.val_fixed_vid_speed = ctk.StringVar(value="1.0")
-        self.val_fixed_vid_speed.trace_add("write", lambda *args: self.save_sync_config(silent=True))
-        ctk.CTkEntry(self.frame_fixed_speed_opts, textvariable=self.val_fixed_vid_speed, width=50).grid(row=0, column=1, padx=5, pady=5)
-        
-        ctk.CTkLabel(self.frame_fixed_speed_opts, text="Tốc độ Audio (x):").grid(row=0, column=2, padx=5, pady=5)
-        self.val_fixed_aud_speed = ctk.StringVar(value="1.0")
-        self.val_fixed_aud_speed.trace_add("write", lambda *args: self.save_sync_config(silent=True))
-        ctk.CTkEntry(self.frame_fixed_speed_opts, textvariable=self.val_fixed_aud_speed, width=50).grid(row=0, column=3, padx=5, pady=5)
+
+        ctk.CTkLabel(self.frame_fixed_speed_opts, text="Audio chậm nhất (x):").grid(row=0, column=0, padx=5, pady=5)
+        self.val_fixed_aud_min_speed = ctk.StringVar(value="0.8")
+        self.val_fixed_aud_min_speed.trace_add("write", lambda *args: self.save_sync_config(silent=True))
+        ctk.CTkEntry(self.frame_fixed_speed_opts, textvariable=self.val_fixed_aud_min_speed, width=50).grid(row=0, column=1, padx=5, pady=5)
+
+        ctk.CTkLabel(self.frame_fixed_speed_opts, text="Audio nhanh nhất (x):").grid(row=0, column=2, padx=5, pady=5)
+        self.val_fixed_aud_max_speed = ctk.StringVar(value="1.5")
+        self.val_fixed_aud_max_speed.trace_add("write", lambda *args: self.save_sync_config(silent=True))
+        ctk.CTkEntry(self.frame_fixed_speed_opts, textvariable=self.val_fixed_aud_max_speed, width=50).grid(row=0, column=3, padx=5, pady=5)
         
         ctk.CTkLabel(self.frame_sync_opts, text="Video chậm tối đa:").grid(row=0, column=0, padx=5, pady=5)
         self.val_min_video = ctk.StringVar(value="0.85")
@@ -919,6 +971,20 @@ class CapCutTTSApp(ctk.CTk):
             self.frame_sync_opts.grid_remove()
             self.frame_fixed_speed_opts.grid_remove()
 
+    def show_sync_mode_guide(self):
+        messagebox.showinfo(
+            "Hướng dẫn chế độ đồng bộ",
+            "Không đồng bộ\n"
+            "• Chèn audio tại đúng mốc SRT, không đổi tốc độ video hoặc audio.\n\n"
+            "Khớp từng câu (Anti-Overlap)\n"
+            "• Cắt video theo từng câu SRT, rồi đổi tốc độ từng đoạn để khớp giọng.\n"
+            "• Khớp sát nhất, nhưng tạo nhiều đoạn video nên dự án nặng và render lâu hơn.\n\n"
+            "Đổi tốc độ toàn bộ (Fixed Speed)\n"
+            "• Video giữ nguyên ở các câu bình thường; audio được tăng tốc trong khoảng Audio chậm nhất–nhanh nhất.\n"
+            "• Chỉ khi audio vẫn quá dài ở tốc độ tối đa, tool mới cắt đúng đoạn video của câu đó và làm chậm đoạn ấy.\n"
+            "• Audio ngắn hơn không bị chỉnh; phần trống được giữ nguyên. Đây là mode nhẹ hơn Anti-Overlap."
+        )
+
     def toggle_adv_settings(self):
         if self.frame_adv.winfo_ismapped():
             self.frame_adv.grid_remove()
@@ -1104,7 +1170,12 @@ class CapCutTTSApp(ctk.CTk):
                     if "val_id_blocks" in config: self.val_id_blocks.set(config["val_id_blocks"])
                     if "sync_mode" in config: self.combo_sync_mode_var.set(config["sync_mode"])
                     if "fixed_vid_speed" in config: self.val_fixed_vid_speed.set(config["fixed_vid_speed"])
-                    if "fixed_aud_speed" in config: self.val_fixed_aud_speed.set(config["fixed_aud_speed"])
+                    if "fixed_aud_min_speed" in config:
+                        self.val_fixed_aud_min_speed.set(config["fixed_aud_min_speed"])
+                    elif "fixed_aud_speed" in config:
+                        self.val_fixed_aud_min_speed.set(config["fixed_aud_speed"])
+                    if "fixed_aud_max_speed" in config:
+                        self.val_fixed_aud_max_speed.set(config["fixed_aud_max_speed"])
                     
                     self.toggle_sync_opts()
                     
@@ -1162,7 +1233,8 @@ class CapCutTTSApp(ctk.CTk):
                 "val_id_blocks": self.val_id_blocks.get(),
                 "sync_mode": self.combo_sync_mode_var.get(),
                 "fixed_vid_speed": self.val_fixed_vid_speed.get(),
-                "fixed_aud_speed": self.val_fixed_aud_speed.get(),
+                "fixed_aud_min_speed": self.val_fixed_aud_min_speed.get(),
+                "fixed_aud_max_speed": self.val_fixed_aud_max_speed.get(),
                 "adv_vid_vol": self.val_vid_vol.get(),
                 "adv_aud_vol": self.val_aud_vol.get(),
                 "wm_enabled": self.val_wm_enabled.get(),
@@ -1192,7 +1264,8 @@ class CapCutTTSApp(ctk.CTk):
         self.val_max_audio.set("1.15")
         self.combo_sync_mode_var.set("Khớp từng câu (Anti-Overlap)")
         self.val_fixed_vid_speed.set("1.0")
-        self.val_fixed_aud_speed.set("1.0")
+        self.val_fixed_aud_min_speed.set("0.8")
+        self.val_fixed_aud_max_speed.set("1.5")
         self.toggle_sync_opts()
         
     def reset_adv_config(self):
@@ -1507,7 +1580,8 @@ class CapCutTTSApp(ctk.CTk):
         max_vid = 1.15
         max_aud = 1.15
         fixed_vid_speed = 1.0
-        fixed_aud_speed = 1.0
+        fixed_aud_min_speed = 0.8
+        fixed_aud_max_speed = 1.5
         
         try:
             val_id_blocks = int(self.val_id_blocks.get())
@@ -1526,18 +1600,22 @@ class CapCutTTSApp(ctk.CTk):
         elif sync_mode == "Đổi tốc độ toàn bộ (Fixed Speed)":
             try:
                 fixed_vid_speed = float(self.val_fixed_vid_speed.get())
-                fixed_aud_speed = float(self.val_fixed_aud_speed.get())
+                fixed_aud_min_speed = float(self.val_fixed_aud_min_speed.get())
+                fixed_aud_max_speed = float(self.val_fixed_aud_max_speed.get())
             except ValueError:
-                messagebox.showwarning("Lỗi", "Vui lòng nhập số hợp lệ cho Tốc độ Video/Audio (ví dụ: 1.0, 1.5).")
+                messagebox.showwarning("Lỗi", "Vui lòng nhập số hợp lệ cho Audio min/max (ví dụ: 0.8, 1.5).")
+                return
+            if fixed_aud_min_speed <= 0 or fixed_aud_max_speed <= 0 or fixed_aud_min_speed > fixed_aud_max_speed:
+                messagebox.showwarning("Lỗi", "Tốc độ audio phải lớn hơn 0 và Audio chậm nhất không được lớn hơn Audio nhanh nhất.")
                 return
 
         adv_settings = self.get_adv_settings()
         self.btn_generate_srt.configure(state="disabled", text="Đang xử lý...")
         self.is_cancelled = False
         self.btn_stop.configure(state="normal")
-        threading.Thread(target=self.generate_srt_thread, args=(srt_file, json_file, voice_type, rate, sync_mode, min_vid, max_vid, max_aud, num_threads, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_speed), daemon=True).start()
+        threading.Thread(target=self.generate_srt_thread, args=(srt_file, json_file, voice_type, rate, sync_mode, min_vid, max_vid, max_aud, num_threads, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed), daemon=True).start()
         
-    def generate_srt_thread(self, srt_file, json_file, voice_type, rate, sync_mode, min_vid_spd, max_vid_spd, max_aud_spd, num_threads, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_speed):
+    def generate_srt_thread(self, srt_file, json_file, voice_type, rate, sync_mode, min_vid_spd, max_vid_spd, max_aud_spd, num_threads, val_id_blocks, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed):
         try:
             subs = pysrt.open(srt_file)
             total = len(subs)
@@ -1905,11 +1983,11 @@ class CapCutTTSApp(ctk.CTk):
             if sync_mode == "Khớp từng câu (Anti-Overlap)":
                 self.after(0, lambda: self.label_status.configure(text="Đang phân tích timeline và chia nhỏ video..."))
             elif sync_mode == "Đổi tốc độ toàn bộ (Fixed Speed)":
-                self.after(0, lambda: self.label_status.configure(text="Đang phân tích timeline và thay đổi tốc độ video/audio..."))
+                self.after(0, lambda: self.label_status.configure(text="Đang khớp audio và chỉ cắt video ở các câu vượt giới hạn..."))
             else:
                 self.after(0, lambda: self.label_status.configure(text="Đang chèn âm thanh vào dự án CapCut..."))
                 
-            modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_speed)
+            modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed)
             
             self.after(0, lambda: self.label_status.configure(text="Hoàn tất!", text_color="green"))
             
@@ -1948,10 +2026,18 @@ class CapCutTTSApp(ctk.CTk):
             max_vid = float(self.val_max_video.get())
             max_aud = float(self.val_max_audio.get())
             fixed_vid_speed = float(self.val_fixed_vid_speed.get())
-            fixed_aud_speed = float(self.val_fixed_aud_speed.get())
+            fixed_aud_min_speed = float(self.val_fixed_aud_min_speed.get())
+            fixed_aud_max_speed = float(self.val_fixed_aud_max_speed.get())
         except:
             min_vid, max_vid, max_aud = 0.85, 1.15, 1.15
-            fixed_vid_speed, fixed_aud_speed = 1.0, 1.0
+            fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed = 1.0, 0.8, 1.5
+
+        if sync_mode == "Đổi tốc độ toàn bộ (Fixed Speed)" and (
+            fixed_aud_min_speed <= 0 or fixed_aud_max_speed <= 0 or
+            fixed_aud_min_speed > fixed_aud_max_speed
+        ):
+            messagebox.showwarning("Lỗi", "Tốc độ audio phải lớn hơn 0 và Audio chậm nhất không được lớn hơn Audio nhanh nhất.")
+            return
             
         adv_settings = self.get_adv_settings()
         
@@ -2100,7 +2186,7 @@ class CapCutTTSApp(ctk.CTk):
                                 "duration": orig_dur, "video_speed": 1.0, "is_dummy": True, "report_item": None
                             })
                     final_audio_info.sort(key=lambda x: x["index"])
-                    modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_speed)
+                    modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed)
                     self.after(0, lambda: self.label_status.configure(text="Hoàn tất! Đã cập nhật âm thanh vào dự án CapCut.", text_color="green"))
                     self.after(0, lambda: messagebox.showinfo("Thành công", "Đã chèn âm thanh vào dự án CapCut thành công!\nVui lòng tải lại dự án trên CapCut."))
                 except Exception as ex:
