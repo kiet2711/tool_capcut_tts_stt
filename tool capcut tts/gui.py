@@ -1231,13 +1231,13 @@ class CapCutTTSApp(ctk.CTk):
         self.combo_vocal_mode = ctk.CTkComboBox(
             self.frame_vocal_options,
             values=[
-                "Tách cả 2 (Giọng nói + Nhạc nền)",
                 "Chỉ lấy Giọng nói (Loại bỏ nhạc nền)",
+                "Tách cả 2 (Giọng nói + Nhạc nền)",
                 "Chỉ lấy Nhạc nền (Tách beat karaoke)",
             ],
             width=240,
         )
-        self.combo_vocal_mode.set("Tách cả 2 (Giọng nói + Nhạc nền)")
+        self.combo_vocal_mode.set("Chỉ lấy Giọng nói (Loại bỏ nhạc nền)")
         self.combo_vocal_mode.grid(row=0, column=1, padx=5, pady=8, sticky="w")
 
         ctk.CTkLabel(
