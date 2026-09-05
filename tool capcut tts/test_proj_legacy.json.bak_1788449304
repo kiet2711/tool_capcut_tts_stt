@@ -1,0 +1,45 @@
+{
+  "id": "PROJ-SINGLE",
+  "duration": 10000000,
+  "materials": {
+    "videos": [
+      {
+        "id": "MAT_1",
+        "path": "v1.mp4"
+      }
+    ],
+    "audios": [],
+    "speeds": [
+      {
+        "id": "SPEED_1",
+        "type": "speed",
+        "speed": 1.0
+      }
+    ],
+    "audio_fades": []
+  },
+  "tracks": [
+    {
+      "id": "TRACK_1",
+      "type": "video",
+      "segments": [
+        {
+          "id": "SEG_1",
+          "material_id": "MAT_1",
+          "target_timerange": {
+            "start": 0,
+            "duration": 10000000
+          },
+          "source_timerange": {
+            "start": 0,
+            "duration": 10000000
+          },
+          "speed": 1.0,
+          "extra_material_refs": [
+            "SPEED_1"
+          ]
+        }
+      ]
+    }
+  ]
+}

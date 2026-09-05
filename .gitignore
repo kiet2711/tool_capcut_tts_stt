@@ -75,3 +75,7 @@ temp_preview_bg.jpg
 draft_content.json
 voice_samples/
 review_giong_doc.html
+capcut_pro_cookie.json
+app_config.json.local
+*.wav
+*.mp3

@@ -12,15 +12,19 @@ Công cụ tự động hóa mạnh mẽ dựa trên API của CapCut, hỗ tr�
   - [Tab 2: Lồng tiếng SRT & Đồng bộ Video (Voiceover & Sync)](#tab-2-lồng-tiếng-srt--đồng-bộ-video-voiceover--sync)
   - [Tab 3: Cắt nhỏ Project CapCut (Split Project)](#tab-3-cắt-nhỏ-project-capcut-split-project)
   - [Tab 4: Nhận diện giọng nói (STT - Speech to Text)](#tab-4-nhận-diện-giọng-nói-stt---speech-to-text)
+  - [Tab 5: Dịch thuật phụ đề AI](#tab-5-dịch-thuật-phụ-đề-ai)
+  - [Tab 6: Tách Giọng Nói (CapCut Cloud API PRO)](#tab-6-tách-giọng-nói-capcut-cloud-api-pro)
 
 ---
 
 ## 1. Chức năng chính
-Công cụ cung cấp 4 tính năng chủ lực phục vụ cho dân Editor / Creator:
+Công cụ cung cấp 6 tính năng chủ lực phục vụ cho dân Editor / Creator:
 - **Tạo giọng nói AI (TTS):** Chuyển đổi đoạn văn bản bất kỳ thành file âm thanh với kho giọng đọc tự nhiên của CapCut.
 - **Lồng tiếng tự động từ file SRT & Khớp hình ảnh:** Tự động tạo giọng đọc cho từng dòng phụ đề SRT và tự động cắt/tăng giảm tốc độ (speed) của video gốc để khớp với độ dài âm thanh AI vừa tạo, sau đó chèn tất cả vào Project CapCut PC.
 - **Cắt nhỏ Project CapCut:** Hỗ trợ tách một dự án (Project) lớn chứa nhiều đoạn video thành các dự án nhỏ hơn để tiện cho việc render hàng loạt.
 - **Nhận diện giọng nói (Speech-to-Text) & Dịch thuật:** Trích xuất lời nói từ video/audio thành file phụ đề chuẩn SRT, hỗ trợ dịch tự động sang các ngôn ngữ khác (ví dụ: Anh sang Việt).
+- **Dịch phụ đề AI:** Dịch file phụ đề SRT tự động giữ nguyên mốc thời gian và định dạng chuẩn.
+- **Tách Giọng Nói (CapCut Cloud API PRO):** Tách giọng đọc/hát (Vocals) và nhạc nền (Instrumental/Beat) trực tiếp bằng **100% API đám mây chính thức của CapCut** (`vc_sound_separate`). Hỗ trợ cấu hình Cookie tài khoản CapCut PRO và cơ chế phân đoạn thông minh (Smart Chunking) bằng FFmpeg giúp xử lý mọi file dài bất kỳ vượt qua giới hạn 15 phút của CapCut.
 
 ---
 
@@ -78,7 +82,8 @@ Phần này ghi chú lại luồng xử lý (Logic Flow) đằng sau mỗi tính
   4. Đọc dữ liệu JSON, chèn các track âm thanh `.mp3` vừa tạo vào Timeline của project.
   5. **Logic Đồng bộ (Sync):** Tính toán độ dài âm thanh AI vừa tạo ($L_{audio}$) và so sánh với độ dài gốc của đoạn video tương ứng trong khoảng SRT ($L_{video}$).
   6. Tính tỷ lệ $Speed = L_{video} / L_{audio}$. Cập nhật thông số `speed` của block video trong file `draft_content.json` để video bị kéo giãn/nén lại khớp hoàn toàn với âm thanh. (Các đoạn rỗng không có chữ cũng sẽ được cắt mảng và giữ nguyên thời lượng).
-  7. Cập nhật và lưu lại file `draft_content.json`.
+  7. **Hỗ trợ Video đã cắt / Nhiều Clip (Multi-clip):** Có tùy chọn checkbox *"✂️ Hỗ trợ video đã bị cắt / nhiều clip (Multi-clip)"* (mặc định: TẮT). Khi BẬT, thuật toán *Timeline Slicing* sẽ duyệt toàn bộ timeline để co giãn từng clip mà vẫn bảo tồn 100% các đoạn cắt, góc quay, hiệu ứng và clip khác nhau.
+  8. Cập nhật và lưu lại file `draft_content.json`.
 
 ### Tab 3: Cắt nhỏ Project CapCut (Split Project)
 - **Tệp liên quan:** `gui.py` (Tab 3)
@@ -97,3 +102,24 @@ Phần này ghi chú lại luồng xử lý (Logic Flow) đằng sau mỗi tính
   3. Khởi tạo Task STT thông qua `client.create_stt_task()`, gửi kèm ngôn ngữ gốc và ngôn ngữ đích (nếu chọn dịch thuật).
   4. **Polling:** Lặp liên tục `query_stt_task` 3 giây/lần. Trạng thái chấp nhận là `"success"` hoặc `"succeed"`. Thời gian timeout tối đa 15 phút.
   5. **Bóc tách & Dịch thuật:** Khi thành công, dùng `extract_subtitles` để build cấu trúc phụ đề. **Lưu ý quan trọng về Dịch thuật:** API CapCut trả về văn bản gốc trong trường `"text"`, và bản dịch (nếu có yêu cầu) trong trường `"translation_text"`. Logic trích xuất sẽ ưu tiên lấy `"translation_text"` nếu tồn tại để tránh việc bị trả về ngôn ngữ gốc. Sau đó hỏi người dùng vị trí `Save As` và ghi ra đĩa định dạng `.srt` chuẩn. Đảm bảo dọn rác (file audio tạm) sau khi hoàn tất.
+
+### Tab 5: Dịch thuật phụ đề AI
+- **Tệp liên quan:** `gui.py` (Tab 5), `capcut_tts_api/translator.py`
+- **Cơ chế:** Dịch theo ngữ cảnh các khối phụ đề SRT thông qua Gemini AI, bảo toàn 100% timecode và thứ tự câu phụ đề.
+
+### Tab 6: Tách Giọng Nói (CapCut Cloud API PRO)
+- **Tệp liên quan:** `gui.py` (Tab 6), `capcut_tts_api/vocal_api.py`
+- **Bản chất kỹ thuật:** Sử dụng trực tiếp API tách giọng chính thức của CapCut PC (`/lv/v1/common_task/new`, `req_key: vc_sound_separate`).
+- **Yêu cầu bản quyền:** Tách giọng nói trên CapCut là tính năng VIP/PRO, do đó hệ thống yêu cầu cấu hình **Cookie / Session ID** của tài khoản CapCut PRO.
+  - Hướng dẫn lấy: Đăng nhập `capcut.com` trên trình duyệt -> `F12` -> `Application` -> `Cookies` -> copy giá trị `sessionid`.
+  - Cookie được lưu an toàn tại tệp `capcut_pro_cookie.json` và tự động nạp mỗi khi mở ứng dụng.
+  - Có nút **"Kiểm tra tài khoản"** để kiểm tra tính hợp lệ qua `/passport/account/info/v2/`.
+- **Cơ chế Smart Chunking vượt giới hạn 15 phút:**
+  - CapCut Cloud giới hạn thời lượng xử lý tác vụ âm thanh không quá 15 phút.
+  - Khi file đầu vào dài hơn 15 phút (kể cả video 30 phút, 1 giờ, 2 giờ...), công cụ sẽ:
+    1. Tự động dùng FFmpeg cắt file nguồn thành các phân đoạn ngắn (mặc định 10 phút, hỗ trợ 5 phút, 14 phút).
+    2. Upload từng phân đoạn lên ByteDance VOD để lấy `vid`.
+    3. Gửi request tạo tác vụ `vc_sound_separate` với `separate_type: 2` (Giọng nói) và `separate_type: 1` (Nhạc nền/Beat).
+    4. Polling chờ CapCut hoàn tất và tải về các lát cắt audio đã tách stem từ CDN CapCut.
+    5. Dùng FFmpeg ghép nối tự động (concat filter) các lát cắt lại thành file âm thanh hoàn chỉnh liền mạch không bị lệch tiếng.
+

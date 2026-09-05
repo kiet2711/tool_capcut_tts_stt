@@ -16,8 +16,15 @@ from mutagen.mp3 import MP3
 import asyncio
 import edge_tts
 from PIL import Image, ImageTk
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from capcut_tts_api import CapCutClient, CapCutError
+from capcut_tts_api.vocal_api import (
+    CapCutVocalSeparator,
+    save_pro_cookie,
+    load_pro_cookie,
+    verify_pro_cookie,
+)
 from capcut_tts_api.translator import (
     GeminiTranslator, SrtItem, parse_srt, build_srt, build_ass, is_srt_content,
     MODEL_MAP, STYLE_PRESETS, CONCURRENCY_OPTIONS, parse_concurrency_val,
@@ -52,7 +59,7 @@ def format_edge_tts_rate(rate_float):
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
 
-def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp từng câu (Anti-Overlap)", adv_settings=None, fixed_vid_speed=1.0, fixed_aud_min_speed=0.8, fixed_aud_max_speed=1.5):
+def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp từng câu (Anti-Overlap)", adv_settings=None, fixed_vid_speed=1.0, fixed_aud_min_speed=0.8, fixed_aud_max_speed=1.5, enable_multi_segment=False):
     """
     audio_info_list: list of dicts like:
     {
@@ -79,13 +86,40 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
     fixed_speed_modes = ["Đổi tốc độ toàn bộ (Fixed Speed)", "Đổi tốc độ toàn bộ (dùng cấu hình Tab 2)"]
     anti_overlap_modes = ["Khớp từng câu (Anti-Overlap)", "Khớp từng câu (dùng cấu hình Tab 2)"]
 
-    
+    # Both sync modes split source video according to SRT time.
+    # A negative gap means that two SRT blocks overlap (or are out of order).
+    if sync_mode in anti_overlap_modes + fixed_speed_modes:
+        timeline_issues = []
+        previous = None
+        for info in sorted(audio_info_list, key=lambda item: item.get("index", 0)):
+            start = int(info.get("start", 0))
+            end = int(info.get("end", 0))
+            index = int(info.get("index", 0)) + 1
+            if end <= start:
+                timeline_issues.append(f"Câu {index}: timecode kết thúc không lớn hơn bắt đầu")
+            if previous and start < previous["end"]:
+                overlap_ms = (previous["end"] - start) / 1000.0
+                timeline_issues.append(
+                    f"Câu {index} chồng câu {previous['index']} {overlap_ms:.0f} ms"
+                )
+            previous = {"index": index, "end": end}
+
+        if timeline_issues:
+            preview = "\n".join(timeline_issues[:12])
+            more = len(timeline_issues) - min(len(timeline_issues), 12)
+            if more:
+                preview += f"\n... và {more} lỗi timecode khác"
+            raise Exception(
+                "Không thể đồng bộ an toàn vì SRT có timecode chồng nhau/không hợp lệ.\n"
+                "Nếu tiếp tục, hình có thể bị cắt lệch so với giọng. Hãy sửa SRT rồi chạy lại:\n"
+                f"{preview}"
+            )
+
     text_track = None
     max_segments = 0
     for track in tracks:
         if track.get("type") == "text":
             seg_len = len(track.get("segments", []))
-            # Removing strict len check because CapCut might drop a few invalid/overlapping subtitle blocks during import.
             if seg_len > max_segments:
                 text_track = track
                 max_segments = seg_len
@@ -94,87 +128,214 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
         text_track["segments"].sort(key=lambda s: s.get("target_timerange", {}).get("start", 0))
         for t_seg in text_track["segments"]:
             t_seg["_orig_start"] = t_seg.get("target_timerange", {}).get("start", 0)
-        for t_seg in text_track["segments"]:
-            t_seg["_orig_start"] = t_seg.get("target_timerange", {}).get("start", 0)
+        used_text_segment_ids = set()
+
+    import copy
 
     if sync_mode in anti_overlap_modes + fixed_speed_modes:
-        video_track = None
-        video_segment = None
-        for track in tracks:
-            if track.get("type") == "video":
-                if len(track.get("segments", [])) > 0:
+        if enable_multi_segment:
+            video_track = None
+            for track in tracks:
+                if track.get("type") == "video" and len(track.get("segments", [])) > 0:
                     video_track = track
-                    video_segment = track["segments"][0]
                     break
+            if not video_track or len(video_track.get("segments", [])) == 0:
+                raise Exception("Không tìm thấy Video track hợp lệ trong project.")
+
+            orig_segments = sorted(
+                video_track["segments"],
+                key=lambda s: s.get("target_timerange", {}).get("start", 0)
+            )
+            timeline_video_end = max(
+                s.get("target_timerange", {}).get("start", 0) + s.get("target_timerange", {}).get("duration", 0)
+                for s in orig_segments
+            ) if orig_segments else 0
+
+            new_video_segments = []
+            current_target_time = 0
+            current_orig_time = 0
+            existing_speed_ids = {
+                item.get("id") for item in materials["speeds"] if item.get("id")
+            }
+
+            def slice_timeline_range(range_start, range_end, target_duration):
+                nonlocal current_target_time
+                if range_end <= range_start or target_duration <= 0:
+                    return
+
+                range_dur = range_end - range_start
+                curr_pos = range_start
+                slices_to_add = []
+
+                for seg in orig_segments:
+                    t_start = seg.get("target_timerange", {}).get("start", 0)
+                    t_dur = seg.get("target_timerange", {}).get("duration", 0)
+                    t_end = t_start + t_dur
+                    if t_end <= range_start or t_start >= range_end:
+                        continue
+
+                    if t_start > curr_pos:
+                        gap_len = min(t_start, range_end) - curr_pos
+                        if gap_len > 0:
+                            slices_to_add.append({"type": "gap", "orig_dur": gap_len})
+                        curr_pos = min(t_start, range_end)
+                        if curr_pos >= range_end:
+                            break
+
+                    overlap_start = max(curr_pos, t_start)
+                    overlap_end = min(range_end, t_end)
+                    overlap_dur = overlap_end - overlap_start
+                    if overlap_dur > 0:
+                        slices_to_add.append({
+                            "type": "seg",
+                            "seg": seg,
+                            "overlap_start": overlap_start,
+                            "overlap_dur": overlap_dur,
+                            "t_start": t_start,
+                            "t_dur": t_dur,
+                            "orig_dur": overlap_dur
+                        })
+                        curr_pos = overlap_end
+
+                if curr_pos < range_end:
+                    gap_len = range_end - curr_pos
+                    slices_to_add.append({"type": "gap", "orig_dur": gap_len})
+
+                accumulated_target_dur = 0
+                num_slices = len(slices_to_add)
+
+                for idx, item in enumerate(slices_to_add):
+                    if idx == num_slices - 1:
+                        item_target_dur = target_duration - accumulated_target_dur
+                    else:
+                        item_target_dur = int(round(target_duration * (item["orig_dur"] / range_dur)))
+                    accumulated_target_dur += item_target_dur
+
+                    if item_target_dur <= 0:
+                        item_target_dur = 1
+
+                    if item["type"] == "gap":
+                        current_target_time += item_target_dur
+                        continue
+
+                    seg = item["seg"]
+                    t_start = item["t_start"]
+                    t_dur = item["t_dur"]
+                    overlap_start = item["overlap_start"]
+                    overlap_dur = item["overlap_dur"]
+
+                    seg_speed = seg.get("speed", 1.0)
+                    if seg_speed is None or seg_speed <= 0:
+                        seg_speed = seg["source_timerange"]["duration"] / t_dur if t_dur > 0 else 1.0
+
+                    is_reverse = seg.get("reverse", False)
+                    offset_from_seg_start = overlap_start - t_start
+                    src_start_orig = seg["source_timerange"]["start"]
+
+                    if not is_reverse:
+                        new_src_start = src_start_orig + int(offset_from_seg_start * seg_speed)
+                        new_src_dur = int(overlap_dur * seg_speed)
+                    else:
+                        orig_src_dur = seg["source_timerange"]["duration"]
+                        new_src_start = src_start_orig + orig_src_dur - int((offset_from_seg_start + overlap_dur) * seg_speed)
+                        new_src_dur = int(overlap_dur * seg_speed)
+
+                    if new_src_dur <= 0:
+                        new_src_dur = 1
+
+                    new_seg_speed = new_src_dur / item_target_dur if item_target_dur > 0 else seg_speed
+
+                    seg_clone = copy.deepcopy(seg)
+                    seg_clone["id"] = str(uuid.uuid4()).upper()
+                    seg_clone["source_timerange"] = {"start": new_src_start, "duration": new_src_dur}
+                    seg_clone["target_timerange"] = {"start": current_target_time, "duration": item_target_dur}
+
+                    preserved_refs = [
+                        ref for ref in seg.get("extra_material_refs", [])
+                        if ref not in existing_speed_ids
+                    ]
+                    speed_id = str(uuid.uuid4()).upper()
+                    materials["speeds"].append({
+                        "id": speed_id, "type": "speed", "mode": 0, "speed": new_seg_speed, "curve_speed": None
+                    })
+                    existing_speed_ids.add(speed_id)
+
+                    seg_clone["extra_material_refs"] = preserved_refs + [speed_id]
+                    seg_clone["speed"] = new_seg_speed
+
+                    new_video_segments.append(seg_clone)
+                    current_target_time += item_target_dur
+
+        else:
+            video_track = None
+            video_segment = None
+            for track in tracks:
+                if track.get("type") == "video":
+                    if len(track.get("segments", [])) > 0:
+                        video_track = track
+                        video_segment = track["segments"][0]
+                        break
+                        
+            if not video_track or not video_segment:
+                raise Exception("Không tìm thấy Video track hợp lệ trong project. Vui lòng đảm bảo project có 1 video.")
+                        
+            new_video_segments = []
+            current_target_time = 0
+            current_source_time = video_segment["source_timerange"]["start"]
+            existing_speed_ids = {
+                item.get("id") for item in materials["speeds"] if item.get("id")
+            }
+            preserved_video_material_refs = [
+                ref for ref in video_segment.get("extra_material_refs", [])
+                if ref not in existing_speed_ids
+            ]
+            
+            def create_video_chunk(source_start, duration, speed):
+                nonlocal current_target_time, current_source_time
+                if duration <= 0:
+                    return None
                     
-        if not video_track or not video_segment:
-            raise Exception("Không tìm thấy Video track hợp lệ trong project. Vui lòng đảm bảo project có 1 video.")
-                    
-        new_video_segments = []
-        current_target_time = 0
-        current_source_time = video_segment["source_timerange"]["start"]
-        existing_speed_ids = {
-            item.get("id") for item in materials["speeds"] if item.get("id")
-        }
-        # Effects, filters, adjustments and animations are referenced from the
-        # segment through extra_material_refs.  Preserve those refs when a
-        # segment is split; only the old speed ref must be replaced.
-        preserved_video_material_refs = [
-            ref for ref in video_segment.get("extra_material_refs", [])
-            if ref not in existing_speed_ids
-        ]
-        
-        import copy
-        
-        def create_video_chunk(source_start, duration, speed):
-            nonlocal current_target_time, current_source_time
-            if duration <= 0:
-                return None
+                seg_clone = copy.deepcopy(video_segment)
+                seg_clone["id"] = str(uuid.uuid4()).upper()
                 
-            seg_clone = copy.deepcopy(video_segment)
-            seg_clone["id"] = str(uuid.uuid4()).upper()
-            
-            target_duration = int(duration / speed)
-            
-            seg_clone["source_timerange"]["start"] = source_start
-            seg_clone["source_timerange"]["duration"] = duration
-            seg_clone["target_timerange"]["start"] = current_target_time
-            seg_clone["target_timerange"]["duration"] = target_duration
-            
-            speed_id = str(uuid.uuid4()).upper()
-            materials["speeds"].append({
-                "id": speed_id, "type": "speed", "mode": 0, "speed": speed, "curve_speed": None
-            })
-            
-            seg_clone["extra_material_refs"] = preserved_video_material_refs + [speed_id]
-            seg_clone["speed"] = speed
-            
-            current_target_time += target_duration
-            current_source_time += duration
-            return seg_clone
+                target_duration = int(duration / speed)
+                
+                seg_clone["source_timerange"]["start"] = source_start
+                seg_clone["source_timerange"]["duration"] = duration
+                seg_clone["target_timerange"]["start"] = current_target_time
+                seg_clone["target_timerange"]["duration"] = target_duration
+                
+                speed_id = str(uuid.uuid4()).upper()
+                materials["speeds"].append({
+                    "id": speed_id, "type": "speed", "mode": 0, "speed": speed, "curve_speed": None
+                })
+                
+                seg_clone["extra_material_refs"] = preserved_video_material_refs + [speed_id]
+                seg_clone["speed"] = speed
+                
+                current_target_time += target_duration
+                current_source_time += duration
+                return seg_clone
 
-        # Fixed Speed is deliberately sparse: consecutive normal portions stay
-        # in one segment.  A new video segment is created only for a sentence
-        # whose audio exceeds the configured maximum speed.
-        fixed_pending_start = None
-        fixed_pending_duration = 0
-
-        def add_fixed_normal(source_start, duration):
-            nonlocal fixed_pending_start, fixed_pending_duration
-            if duration <= 0:
-                return
-            if fixed_pending_start is None:
-                fixed_pending_start = source_start
-            fixed_pending_duration += duration
-
-        def flush_fixed_normal():
-            nonlocal fixed_pending_start, fixed_pending_duration
-            if fixed_pending_duration > 0:
-                chunk = create_video_chunk(fixed_pending_start, fixed_pending_duration, 1.0)
-                if chunk:
-                    new_video_segments.append(chunk)
             fixed_pending_start = None
             fixed_pending_duration = 0
+
+            def add_fixed_normal(source_start, duration):
+                nonlocal fixed_pending_start, fixed_pending_duration
+                if duration <= 0:
+                    return
+                if fixed_pending_start is None:
+                    fixed_pending_start = source_start
+                fixed_pending_duration += duration
+
+            def flush_fixed_normal():
+                nonlocal fixed_pending_start, fixed_pending_duration
+                if fixed_pending_duration > 0:
+                    chunk = create_video_chunk(fixed_pending_start, fixed_pending_duration, 1.0)
+                    if chunk:
+                        new_video_segments.append(chunk)
+                fixed_pending_start = None
+                fixed_pending_duration = 0
 
     new_audio_track_id = str(uuid.uuid4()).upper()
     new_audio_track = {
@@ -193,52 +354,85 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
         
         audio_speed_val = 1.0
         sync_target_duration = srt_end - srt_start
-        if sync_mode in fixed_speed_modes:
-            block_source_duration = srt_end - srt_start
-            source_at_block = current_source_time + fixed_pending_duration
-            gap_duration = srt_start - source_at_block
-            if gap_duration > 0:
-                add_fixed_normal(source_at_block, gap_duration)
-                source_at_block += gap_duration
 
-            requested_audio_speed = audio_duration_micros / block_source_duration if block_source_duration > 0 else 1.0
-            if requested_audio_speed > fixed_aud_max_speed:
-                # Audio is still too long at its fastest permitted speed.  Keep
-                # audio at that limit and slow only this matching video portion.
-                audio_speed_val = fixed_aud_max_speed
-                audio_target_duration = int(audio_duration_micros / audio_speed_val)
-                flush_fixed_normal()
+        if enable_multi_segment and sync_mode in anti_overlap_modes + fixed_speed_modes:
+            block_source_duration = srt_end - srt_start
+            gap_duration = srt_start - current_orig_time
+            if gap_duration > 0:
+                slice_timeline_range(current_orig_time, srt_start, gap_duration)
+                current_orig_time = srt_start
+
+            block_target_start = current_target_time
+
+            if sync_mode in fixed_speed_modes:
+                requested_audio_speed = audio_duration_micros / block_source_duration if block_source_duration > 0 else 1.0
+                if requested_audio_speed > fixed_aud_max_speed:
+                    audio_speed_val = fixed_aud_max_speed
+                    audio_target_duration = int(audio_duration_micros / audio_speed_val)
+                    slice_timeline_range(srt_start, srt_end, audio_target_duration)
+                    sync_target_duration = audio_target_duration
+                else:
+                    if requested_audio_speed > 1.0:
+                        audio_speed_val = max(fixed_aud_min_speed, requested_audio_speed)
+                    audio_target_duration = int(audio_duration_micros / audio_speed_val)
+                    slice_timeline_range(srt_start, srt_end, block_source_duration)
+                    sync_target_duration = block_source_duration
+            else:
+                target_sentence_dur = int(block_source_duration / video_speed) if video_speed > 0 else block_source_duration
+                slice_timeline_range(srt_start, srt_end, target_sentence_dur)
+                audio_target_duration = audio_duration_micros
+                sync_target_duration = audio_duration_micros
+
+            current_orig_time = srt_end
+
+        else:
+            if sync_mode in fixed_speed_modes:
+                block_source_duration = srt_end - srt_start
+                source_at_block = current_source_time + fixed_pending_duration
+                gap_duration = srt_start - source_at_block
+                if gap_duration < 0:
+                    raise Exception(
+                        f"Timeline SRT không thể map an toàn ở câu {info.get('index', i) + 1}: "
+                        f"con trỏ video vượt mốc SRT {-gap_duration / 1000.0:.0f} ms."
+                    )
+                if gap_duration > 0:
+                    add_fixed_normal(source_at_block, gap_duration)
+                    source_at_block += gap_duration
+
+                requested_audio_speed = audio_duration_micros / block_source_duration if block_source_duration > 0 else 1.0
+                if requested_audio_speed > fixed_aud_max_speed:
+                    audio_speed_val = fixed_aud_max_speed
+                    audio_target_duration = int(audio_duration_micros / audio_speed_val)
+                    flush_fixed_normal()
+                    block_target_start = current_target_time
+                    video_speed = block_source_duration / audio_target_duration if audio_target_duration > 0 else 1.0
+                    chunk = create_video_chunk(current_source_time, block_source_duration, video_speed)
+                    if chunk:
+                        new_video_segments.append(chunk)
+                    sync_target_duration = audio_target_duration
+                else:
+                    if requested_audio_speed > 1.0:
+                        audio_speed_val = max(fixed_aud_min_speed, requested_audio_speed)
+                    audio_target_duration = int(audio_duration_micros / audio_speed_val)
+                    block_target_start = current_target_time + fixed_pending_duration
+                    add_fixed_normal(source_at_block, block_source_duration)
+            else:
+                block_target_start = srt_start
+                audio_target_duration = audio_duration_micros
+                
+            if sync_mode in anti_overlap_modes:
+                gap_duration = srt_start - current_source_time
+                if gap_duration > 0:
+                    chunk = create_video_chunk(current_source_time, gap_duration, 1.0)
+                    if chunk:
+                        new_video_segments.append(chunk)
+                        
                 block_target_start = current_target_time
-                video_speed = block_source_duration / audio_target_duration if audio_target_duration > 0 else 1.0
+                block_source_duration = srt_end - srt_start
+                
                 chunk = create_video_chunk(current_source_time, block_source_duration, video_speed)
                 if chunk:
                     new_video_segments.append(chunk)
-                sync_target_duration = audio_target_duration
-            else:
-                # Short audio is left untouched, as requested.  Otherwise use
-                # only the needed audio acceleration and keep video unchanged.
-                if requested_audio_speed > 1.0:
-                    audio_speed_val = max(fixed_aud_min_speed, requested_audio_speed)
-                audio_target_duration = int(audio_duration_micros / audio_speed_val)
-                block_target_start = current_target_time + fixed_pending_duration
-                add_fixed_normal(source_at_block, block_source_duration)
-        else:
-            block_target_start = srt_start
-            audio_target_duration = audio_duration_micros
-            
-        if sync_mode in anti_overlap_modes:
-            gap_duration = srt_start - current_source_time
-            if gap_duration > 0:
-                chunk = create_video_chunk(current_source_time, gap_duration, 1.0)
-                if chunk:
-                    new_video_segments.append(chunk)
-                    
-            block_target_start = current_target_time
-            block_source_duration = srt_end - srt_start
-            
-            chunk = create_video_chunk(current_source_time, block_source_duration, video_speed)
-            if chunk:
-                new_video_segments.append(chunk)
             
         if text_track and sync_mode in anti_overlap_modes + fixed_speed_modes:
             srt_start = info["start"]
@@ -246,6 +440,8 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
             min_diff = float('inf')
             
             for t_seg in text_track["segments"]:
+                if t_seg.get("id") in used_text_segment_ids:
+                    continue
                 diff = abs(t_seg.get("_orig_start", 0) - srt_start)
                 if diff < min_diff:
                     min_diff = diff
@@ -255,6 +451,7 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
                 text_seg = None
                 
             if text_seg:
+                used_text_segment_ids.add(text_seg.get("id"))
                 if text_seg.get("target_timerange") is not None:
                     text_seg["target_timerange"]["start"] = block_target_start
                     text_seg["target_timerange"]["duration"] = audio_duration_micros if sync_mode in anti_overlap_modes else sync_target_duration
@@ -297,16 +494,21 @@ def modify_capcut_project(draft_json_path, audio_info_list, sync_mode="Khớp t�
         })
         
     if sync_mode in anti_overlap_modes + fixed_speed_modes:
-        if sync_mode in fixed_speed_modes:
-            flush_fixed_normal()
-        final_video_duration = video_segment["source_timerange"]["start"] + video_segment["source_timerange"]["duration"]
-        if current_source_time < final_video_duration:
-            chunk = create_video_chunk(current_source_time, final_video_duration - current_source_time, 1.0)
-            if chunk:
-                new_video_segments.append(chunk)
-                
-        video_track["segments"] = new_video_segments
-        
+        if enable_multi_segment:
+            if current_orig_time < timeline_video_end:
+                remainder_dur = timeline_video_end - current_orig_time
+                slice_timeline_range(current_orig_time, timeline_video_end, remainder_dur)
+            video_track["segments"] = new_video_segments
+        else:
+            if sync_mode in fixed_speed_modes:
+                flush_fixed_normal()
+            final_video_duration = video_segment["source_timerange"]["start"] + video_segment["source_timerange"]["duration"]
+            if current_source_time < final_video_duration:
+                chunk = create_video_chunk(current_source_time, final_video_duration - current_source_time, 1.0)
+                if chunk:
+                    new_video_segments.append(chunk)
+            video_track["segments"] = new_video_segments
+            
     if adv_settings:
         vid_vol_mult = 10 ** (adv_settings.get("vid_vol", 0.0) / 20.0)
         aud_vol_mult = 10 ** (adv_settings.get("aud_vol", 0.0) / 20.0)
@@ -562,6 +764,7 @@ class CapCutTTSApp(ctk.CTk):
         self.tab_split = self.tabview.add("Chia Nhỏ Project")
         self.tab_stt = self.tabview.add("Nhận diện (STT)")
         self.tab_trans = self.tabview.add("Dịch Thuật (AI)")
+        self.tab_vocal = self.tabview.add("Tách Giọng Nói (PRO)")
         
         # -- Tab 1: Basic TTS --
         self.tab_basic.grid_columnconfigure(0, weight=1)
@@ -637,6 +840,9 @@ class CapCutTTSApp(ctk.CTk):
         # longer applies one speed to the complete video timeline.
         self.val_fixed_vid_speed = ctk.StringVar(value="1.0")
 
+        self.val_enable_multi_segment = ctk.BooleanVar(value=False)
+        self.val_enable_multi_segment.trace_add("write", lambda *args: self.save_sync_config(silent=True))
+
         ctk.CTkLabel(self.frame_fixed_speed_opts, text="Audio chậm nhất (x):").grid(row=0, column=0, padx=5, pady=5)
         self.val_fixed_aud_min_speed = ctk.StringVar(value="0.8")
         self.val_fixed_aud_min_speed.trace_add("write", lambda *args: self.save_sync_config(silent=True))
@@ -646,6 +852,14 @@ class CapCutTTSApp(ctk.CTk):
         self.val_fixed_aud_max_speed = ctk.StringVar(value="1.5")
         self.val_fixed_aud_max_speed.trace_add("write", lambda *args: self.save_sync_config(silent=True))
         ctk.CTkEntry(self.frame_fixed_speed_opts, textvariable=self.val_fixed_aud_max_speed, width=50).grid(row=0, column=3, padx=5, pady=5)
+
+        self.chk_multi_segment_fixed = ctk.CTkCheckBox(
+            self.frame_fixed_speed_opts,
+            text="✂️ Hỗ trợ video đã bị cắt / nhiều clip (Multi-clip)",
+            variable=self.val_enable_multi_segment,
+            font=ctk.CTkFont(size=12)
+        )
+        self.chk_multi_segment_fixed.grid(row=1, column=0, columnspan=4, padx=5, pady=(4, 5), sticky="w")
         
         ctk.CTkLabel(self.frame_sync_opts, text="Video chậm tối đa:").grid(row=0, column=0, padx=5, pady=5)
         self.val_min_video = ctk.StringVar(value="0.85")
@@ -663,6 +877,14 @@ class CapCutTTSApp(ctk.CTk):
         ctk.CTkEntry(self.frame_sync_opts, textvariable=self.val_max_audio, width=50).grid(row=0, column=5, padx=5, pady=5)
         
         ctk.CTkButton(self.frame_sync_opts, text="Reset về mặc định", width=80, fg_color="#b23b3b", hover_color="#8f2b2b", command=self.reset_sync_config).grid(row=0, column=6, padx=5, pady=5, sticky="ns")
+
+        self.chk_multi_segment_anti = ctk.CTkCheckBox(
+            self.frame_sync_opts,
+            text="✂️ Hỗ trợ video đã bị cắt / nhiều clip (Multi-clip)",
+            variable=self.val_enable_multi_segment,
+            font=ctk.CTkFont(size=12)
+        )
+        self.chk_multi_segment_anti.grid(row=1, column=0, columnspan=5, padx=5, pady=(4, 5), sticky="w")
         
         self.frame_tab_srt_btns = ctk.CTkFrame(self.tab_srt, fg_color="transparent")
         self.frame_tab_srt_btns.grid(row=6, column=0, columnspan=3, padx=10, pady=20, sticky="ew")
@@ -874,6 +1096,230 @@ class CapCutTTSApp(ctk.CTk):
         ctk.CTkButton(self.frame_trans_btns, text="➡️ Nạp vào Tab SRT", height=38, fg_color="#4f46e5", hover_color="#4338ca", command=self.send_trans_to_srt).pack(side="right", padx=2)
         ctk.CTkButton(self.frame_trans_btns, text="➡️ Nạp vào Tab TTS", height=38, fg_color="#059669", hover_color="#047857", command=self.send_trans_to_tts).pack(side="right", padx=2)
 
+        # -- Tab 6: Vocal Separation (CapCut Cloud API PRO) --
+        self.tab_vocal.grid_columnconfigure(0, weight=1)
+
+        # 1. Khung cấu hình tài khoản CapCut PRO
+        self.frame_vocal_auth = ctk.CTkFrame(self.tab_vocal)
+        self.frame_vocal_auth.grid(row=0, column=0, padx=10, pady=(10, 5), sticky="ew")
+        self.frame_vocal_auth.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self.frame_vocal_auth,
+            text="👑 Tài Khoản CapCut PRO:",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, padx=10, pady=8, sticky="w")
+
+        self.vocal_cookie_input = ctk.CTkEntry(
+            self.frame_vocal_auth,
+            placeholder_text="Dán Cookie hoặc giá trị sessionid của tài khoản CapCut PRO vào đây...",
+            font=ctk.CTkFont(size=12),
+        )
+        self.vocal_cookie_input.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
+        saved_ck = load_pro_cookie()
+        if saved_ck:
+            self.vocal_cookie_input.insert(0, saved_ck)
+
+        self.btn_save_cookie = ctk.CTkButton(
+            self.frame_vocal_auth,
+            text="💾 Lưu Cookie",
+            width=90,
+            command=self.save_vocal_cookie_gui,
+        )
+        self.btn_save_cookie.grid(row=0, column=2, padx=5, pady=8)
+
+        self.btn_verify_cookie = ctk.CTkButton(
+            self.frame_vocal_auth,
+            text="🔍 Kiểm tra tài khoản",
+            width=130,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            command=self.verify_vocal_cookie_gui,
+        )
+        self.btn_verify_cookie.grid(row=0, column=3, padx=(5, 10), pady=8)
+
+        self.frame_vocal_tip = ctk.CTkFrame(self.frame_vocal_auth, fg_color="transparent")
+        self.frame_vocal_tip.grid(row=1, column=0, columnspan=4, padx=10, pady=(0, 8), sticky="ew")
+        self.frame_vocal_tip.grid_columnconfigure(0, weight=1)
+
+        self.vocal_account_status = ctk.CTkLabel(
+            self.frame_vocal_tip,
+            text="💡 Hướng dẫn: Đăng nhập capcut.com trên trình duyệt -> F12 -> Application -> Cookies -> Copy sessionid.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        self.vocal_account_status.grid(row=0, column=0, sticky="w")
+
+        # 2. Khung chọn file media & thư mục đầu ra
+        self.frame_vocal_files = ctk.CTkFrame(self.tab_vocal)
+        self.frame_vocal_files.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
+        self.frame_vocal_files.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self.frame_vocal_files,
+            text="Tệp Video/Audio:",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, padx=10, pady=8, sticky="w")
+
+        self.vocal_media_path = ctk.StringVar(value="")
+        self.entry_vocal_media = ctk.CTkEntry(
+            self.frame_vocal_files,
+            textvariable=self.vocal_media_path,
+            placeholder_text="Chọn tệp video hoặc âm thanh (MP4, MKV, MP3, WAV, M4A, FLAC...)",
+        )
+        self.entry_vocal_media.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
+
+        ctk.CTkButton(
+            self.frame_vocal_files,
+            text="Chọn file...",
+            width=90,
+            command=self.select_vocal_media,
+        ).grid(row=0, column=2, padx=5, pady=8)
+
+        ctk.CTkLabel(
+            self.frame_vocal_files,
+            text="Thư mục xuất:",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=1, column=0, padx=10, pady=8, sticky="w")
+
+        self.vocal_out_dir = ctk.StringVar(value="")
+        self.entry_vocal_out_dir = ctk.CTkEntry(
+            self.frame_vocal_files,
+            textvariable=self.vocal_out_dir,
+            placeholder_text="Để trống sẽ tự động lưu cùng thư mục với file gốc",
+        )
+        self.entry_vocal_out_dir.grid(row=1, column=1, padx=5, pady=8, sticky="ew")
+
+        ctk.CTkButton(
+            self.frame_vocal_files,
+            text="Chọn thư mục...",
+            width=90,
+            command=self.select_vocal_out_dir,
+        ).grid(row=1, column=2, padx=5, pady=8)
+
+        ctk.CTkButton(
+            self.frame_vocal_files,
+            text="📂 Mở",
+            width=50,
+            fg_color="#374151",
+            hover_color="#4b5563",
+            command=self.open_vocal_output_dir,
+        ).grid(row=1, column=3, padx=(2, 10), pady=8)
+
+        # 3. Khung cài đặt chế độ tách & phân đoạn thông minh
+        self.frame_vocal_options = ctk.CTkFrame(self.tab_vocal)
+        self.frame_vocal_options.grid(row=2, column=0, padx=10, pady=5, sticky="ew")
+        self.frame_vocal_options.grid_columnconfigure(5, weight=1)
+
+        ctk.CTkLabel(
+            self.frame_vocal_options,
+            text="Chế độ tách:",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, padx=(10, 5), pady=8, sticky="w")
+
+        self.combo_vocal_mode = ctk.CTkComboBox(
+            self.frame_vocal_options,
+            values=[
+                "Tách cả 2 (Giọng nói + Nhạc nền)",
+                "Chỉ lấy Giọng nói (Loại bỏ nhạc nền)",
+                "Chỉ lấy Nhạc nền (Tách beat karaoke)",
+            ],
+            width=240,
+        )
+        self.combo_vocal_mode.set("Tách cả 2 (Giọng nói + Nhạc nền)")
+        self.combo_vocal_mode.grid(row=0, column=1, padx=5, pady=8, sticky="w")
+
+        ctk.CTkLabel(
+            self.frame_vocal_options,
+            text="Định dạng xuất:",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=2, padx=(15, 5), pady=8, sticky="w")
+
+        self.combo_vocal_format = ctk.CTkComboBox(
+            self.frame_vocal_options,
+            values=["MP3 (320kbps siêu nét)", "WAV (Lossless chuyên nghiệp)"],
+            width=180,
+        )
+        self.combo_vocal_format.set("MP3 (320kbps siêu nét)")
+        self.combo_vocal_format.grid(row=0, column=3, padx=5, pady=8, sticky="w")
+
+        self.vocal_smart_chunk = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            self.frame_vocal_options,
+            text="✂️ Phân đoạn thông minh nếu file > 15 phút (Khắc phục giới hạn CapCut)",
+            variable=self.vocal_smart_chunk,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="w")
+
+        ctk.CTkLabel(
+            self.frame_vocal_options,
+            text="Độ dài phân đoạn:",
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=2, padx=(15, 5), pady=(0, 8), sticky="w")
+
+        self.combo_vocal_chunk_dur = ctk.CTkComboBox(
+            self.frame_vocal_options,
+            values=["10 phút (Khuyên dùng)", "5 phút", "14 phút"],
+            width=150,
+        )
+        self.combo_vocal_chunk_dur.set("10 phút (Khuyên dùng)")
+        self.combo_vocal_chunk_dur.grid(row=1, column=3, padx=5, pady=(0, 8), sticky="w")
+
+        # 4. Khung tiến trình & nút thao tác
+        self.frame_vocal_action = ctk.CTkFrame(self.tab_vocal)
+        self.frame_vocal_action.grid(row=3, column=0, padx=10, pady=(5, 10), sticky="ew")
+        self.frame_vocal_action.grid_columnconfigure(0, weight=1)
+
+        self.vocal_progressbar = ctk.CTkProgressBar(self.frame_vocal_action)
+        self.vocal_progressbar.grid(row=0, column=0, columnspan=4, padx=10, pady=(10, 5), sticky="ew")
+        self.vocal_progressbar.set(0)
+
+        self.vocal_status_label = ctk.CTkLabel(
+            self.frame_vocal_action,
+            text="Sẵn sàng tách giọng với CapCut Cloud API.",
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+        )
+        self.vocal_status_label.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="w")
+
+        self.frame_vocal_btns = ctk.CTkFrame(self.frame_vocal_action, fg_color="transparent")
+        self.frame_vocal_btns.grid(row=2, column=0, columnspan=4, padx=10, pady=(0, 10), sticky="ew")
+
+        self.btn_start_vocal = ctk.CTkButton(
+            self.frame_vocal_btns,
+            text="🚀 Bắt đầu tách giọng (CapCut API)",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=38,
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            command=self.on_start_vocal_separation,
+        )
+        self.btn_start_vocal.pack(side="left", padx=(0, 10))
+
+        self.btn_cancel_vocal = ctk.CTkButton(
+            self.frame_vocal_btns,
+            text="⏹ Huỷ",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=38,
+            width=80,
+            fg_color="#b23b3b",
+            hover_color="#8f2b2b",
+            state="disabled",
+            command=self.on_cancel_vocal_separation,
+        )
+        self.btn_cancel_vocal.pack(side="left", padx=(0, 10))
+
+        self.btn_open_vocal_dir = ctk.CTkButton(
+            self.frame_vocal_btns,
+            text="📂 Mở thư mục kết quả",
+            height=38,
+            command=self.open_vocal_output_dir,
+        )
+        self.btn_open_vocal_dir.pack(side="left", padx=2)
+
+        self.vocal_is_running = False
+        self.vocal_cancelled = False
+
         # -- 3. Advanced Settings (Collapsible) --
         self.btn_toggle_adv = ctk.CTkButton(self, text="[+] Hiển thị tuỳ chỉnh nâng cao", fg_color="transparent", text_color="gray", hover_color="#2a2d2e", command=self.toggle_adv_settings)
         self.btn_toggle_adv.grid(row=2, column=0, padx=20, pady=(0, 5), sticky="w")
@@ -982,7 +1428,10 @@ class CapCutTTSApp(ctk.CTk):
             "Đổi tốc độ toàn bộ (Fixed Speed)\n"
             "• Video giữ nguyên ở các câu bình thường; audio được tăng tốc trong khoảng Audio chậm nhất–nhanh nhất.\n"
             "• Chỉ khi audio vẫn quá dài ở tốc độ tối đa, tool mới cắt đúng đoạn video của câu đó và làm chậm đoạn ấy.\n"
-            "• Audio ngắn hơn không bị chỉnh; phần trống được giữ nguyên. Đây là mode nhẹ hơn Anti-Overlap."
+            "• Audio ngắn hơn không bị chỉnh; phần trống được giữ nguyên. Đây là mode nhẹ hơn Anti-Overlap.\n\n"
+            "✂️ Tùy chọn: Hỗ trợ video đã bị cắt / nhiều clip (Multi-clip)\n"
+            "• Mặc định: TẮT (dùng thuật toán gốc cho dự án có 1 video liền mạch).\n"
+            "• BẬT: Khi dự án CapCut của bạn đã bị cắt tỉa nhiều đoạn hoặc ghép nối từ nhiều clip khác nhau. Tool sẽ tự động quét toàn bộ timeline và co giãn từng clip mà vẫn giữ nguyên vị trí cắt, hiệu ứng, góc quay."
         )
 
     def toggle_adv_settings(self):
@@ -1176,6 +1625,8 @@ class CapCutTTSApp(ctk.CTk):
                         self.val_fixed_aud_min_speed.set(config["fixed_aud_speed"])
                     if "fixed_aud_max_speed" in config:
                         self.val_fixed_aud_max_speed.set(config["fixed_aud_max_speed"])
+                    if "enable_multi_segment_video" in config and hasattr(self, "val_enable_multi_segment"):
+                        self.val_enable_multi_segment.set(bool(config["enable_multi_segment_video"]))
                     
                     self.toggle_sync_opts()
                     
@@ -1235,6 +1686,7 @@ class CapCutTTSApp(ctk.CTk):
                 "fixed_vid_speed": self.val_fixed_vid_speed.get(),
                 "fixed_aud_min_speed": self.val_fixed_aud_min_speed.get(),
                 "fixed_aud_max_speed": self.val_fixed_aud_max_speed.get(),
+                "enable_multi_segment_video": self.val_enable_multi_segment.get() if hasattr(self, "val_enable_multi_segment") else False,
                 "adv_vid_vol": self.val_vid_vol.get(),
                 "adv_aud_vol": self.val_aud_vol.get(),
                 "wm_enabled": self.val_wm_enabled.get(),
@@ -1266,6 +1718,8 @@ class CapCutTTSApp(ctk.CTk):
         self.val_fixed_vid_speed.set("1.0")
         self.val_fixed_aud_min_speed.set("0.8")
         self.val_fixed_aud_max_speed.set("1.5")
+        if hasattr(self, "val_enable_multi_segment"):
+            self.val_enable_multi_segment.set(False)
         self.toggle_sync_opts()
         
     def reset_adv_config(self):
@@ -1621,6 +2075,63 @@ class CapCutTTSApp(ctk.CTk):
             total = len(subs)
             if total == 0:
                 raise Exception("File SRT rỗng hoặc không hợp lệ.")
+
+            # Syncing a single original video needs a monotonic, non-overlapping
+            # source timeline.  Chunked STT occasionally returns two adjacent
+            # rows that overlap at a chunk boundary.  Preserve subtitle order:
+            # move the later row to the previous row's end while preserving its
+            # own duration.  A following row is adjusted only if this local
+            # move reaches it.  This prevents the video source cursor from
+            # moving past the next SRT start without shifting the rest of a
+            # long video.
+            srt_timeline_issues = []
+            srt_timeline_adjustments = []
+            previous_nonempty = None
+            for i, sub in enumerate(subs):
+                text = sub.text.replace("\n", " ").strip()
+                if not text:
+                    continue
+                start_ms = sub.start.ordinal
+                end_ms = sub.end.ordinal
+                if end_ms <= start_ms:
+                    srt_timeline_issues.append(
+                        f"Câu {i + 1}: timecode kết thúc không lớn hơn bắt đầu"
+                    )
+                if previous_nonempty and start_ms < previous_nonempty["end_ms"]:
+                    old_start_ms = start_ms
+                    old_end_ms = end_ms
+                    shift_ms = previous_nonempty["end_ms"] - start_ms
+                    start_ms += shift_ms
+                    end_ms += shift_ms
+                    sub.start.ordinal = start_ms
+                    sub.end.ordinal = end_ms
+                    srt_timeline_adjustments.append({
+                        "shifted_index": i + 1,
+                        "previous_index": previous_nonempty["index"],
+                        "old_start_ms": old_start_ms,
+                        "new_start_ms": start_ms,
+                        "old_end_ms": old_end_ms,
+                        "new_end_ms": end_ms,
+                        "shifted_ms": shift_ms,
+                    })
+                previous_nonempty = {"index": i + 1, "end_ms": end_ms}
+
+            if srt_timeline_issues and sync_mode != "Không đồng bộ":
+                preview = "\n".join(srt_timeline_issues[:12])
+                more = len(srt_timeline_issues) - min(len(srt_timeline_issues), 12)
+                if more:
+                    preview += f"\n... và {more} lỗi timecode khác"
+                raise Exception(
+                    "SRT có timecode chồng nhau/không hợp lệ nên không thể khớp hình an toàn.\n"
+                    "Hãy sửa các mốc sau hoặc chọn 'Không đồng bộ':\n"
+                    f"{preview}"
+                )
+
+            if srt_timeline_adjustments and sync_mode != "Không đồng bộ":
+                self.after(0, lambda n=len(srt_timeline_adjustments): self.label_status.configure(
+                    text=f"Đã tự xử lý {n} chỗ SRT chồng nhau ở ranh giới STT; đang tạo giọng...",
+                    text_color="orange"
+                ))
                 
             self.after(0, lambda: self.progressbar.set(0))
             self.after(0, lambda: self.label_progress.configure(text=f"Tiến độ: 0 / {total} câu"))
@@ -1630,6 +2141,10 @@ class CapCutTTSApp(ctk.CTk):
             proj_dir = os.path.dirname(json_file)
             audio_dir = os.path.join(proj_dir, "tts_audios")
             os.makedirs(audio_dir, exist_ok=True)
+            if srt_timeline_adjustments and sync_mode != "Không đồng bộ":
+                adjustment_path = os.path.join(proj_dir, "srt_timeline_adjustments.json")
+                with open(adjustment_path, "w", encoding="utf-8") as f:
+                    json.dump(srt_timeline_adjustments, f, ensure_ascii=False, indent=2)
             
             import concurrent.futures
             
@@ -1987,7 +2502,7 @@ class CapCutTTSApp(ctk.CTk):
             else:
                 self.after(0, lambda: self.label_status.configure(text="Đang chèn âm thanh vào dự án CapCut..."))
                 
-            modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed)
+            modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed, enable_multi_segment=self.val_enable_multi_segment.get() if hasattr(self, 'val_enable_multi_segment') else False)
             
             self.after(0, lambda: self.label_status.configure(text="Hoàn tất!", text_color="green"))
             
@@ -2186,7 +2701,7 @@ class CapCutTTSApp(ctk.CTk):
                                 "duration": orig_dur, "video_speed": 1.0, "is_dummy": True, "report_item": None
                             })
                     final_audio_info.sort(key=lambda x: x["index"])
-                    modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed)
+                    modify_capcut_project(json_file, final_audio_info, sync_mode, adv_settings, fixed_vid_speed, fixed_aud_min_speed, fixed_aud_max_speed, enable_multi_segment=self.val_enable_multi_segment.get() if hasattr(self, 'val_enable_multi_segment') else False)
                     self.after(0, lambda: self.label_status.configure(text="Hoàn tất! Đã cập nhật âm thanh vào dự án CapCut.", text_color="green"))
                     self.after(0, lambda: messagebox.showinfo("Thành công", "Đã chèn âm thanh vào dự án CapCut thành công!\nVui lòng tải lại dự án trên CapCut."))
                 except Exception as ex:
@@ -2647,6 +3162,225 @@ class CapCutTTSApp(ctk.CTk):
         self.tabview.set("Chèn SRT vào CapCut")
         messagebox.showinfo("Thành công", f"Đã nạp file phụ đề dịch sang Tab 'Chèn SRT vào CapCut'!\nĐường dẫn tạm:\n{temp_srt_path}")
 
+    # =========================================================================
+    # Tab 6: Vocal Separation (CapCut Cloud API PRO) Event Handlers
+    # =========================================================================
+
+    def save_vocal_cookie_gui(self):
+        cookie = self.vocal_cookie_input.get().strip()
+        if not cookie:
+            messagebox.showwarning("Cảnh báo", "Vui lòng dán Cookie hoặc sessionid của tài khoản CapCut PRO trước khi lưu!")
+            return
+        save_pro_cookie(cookie)
+        messagebox.showinfo("Đã lưu", "Đã lưu Cookie tài khoản CapCut PRO vào tệp cấu hình!")
+
+    def verify_vocal_cookie_gui(self):
+        cookie = self.vocal_cookie_input.get().strip()
+        if not cookie:
+            messagebox.showwarning("Cảnh báo", "Vui lòng nhập Cookie hoặc sessionid trước khi kiểm tra!")
+            return
+
+        self.btn_verify_cookie.configure(state="disabled", text="Đang kiểm tra...")
+        self.vocal_account_status.configure(text="⏳ Đang kết nối máy chủ CapCut để xác thực...", text_color="gray")
+
+        def _worker():
+            res = verify_pro_cookie(cookie)
+
+            def _update_ui():
+                self.btn_verify_cookie.configure(state="normal", text="🔍 Kiểm tra tài khoản")
+                if res.get("valid"):
+                    save_pro_cookie(cookie)
+                    msg = f"✅ {res.get('message')}"
+                    self.vocal_account_status.configure(text=msg, text_color="#10b981")
+                    messagebox.showinfo("Tài khoản hợp lệ", f"Đã xác thực thành công tài khoản CapCut PRO:\n\n{res.get('message')}")
+                else:
+                    msg = f"❌ {res.get('message')}"
+                    self.vocal_account_status.configure(text=msg, text_color="#ef4444")
+                    messagebox.showerror("Xác thực thất bại", f"{res.get('message')}\n\nVui lòng kiểm tra lại Cookie/SessionID từ capcut.com!")
+
+            self.after(0, _update_ui)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def select_vocal_media(self):
+        file_path = filedialog.askopenfilename(
+            title="Chọn tệp Video hoặc Âm thanh để tách giọng",
+            filetypes=[
+                (
+                    "Tất cả tệp media",
+                    "*.mp4 *.mov *.mkv *.avi *.flv *.webm *.mp3 *.wav *.m4a *.aac *.flac *.ogg",
+                ),
+                ("Video", "*.mp4 *.mov *.mkv *.avi *.flv *.webm"),
+                ("Audio", "*.mp3 *.wav *.m4a *.aac *.flac *.ogg"),
+                ("Tất cả files", "*.*"),
+            ],
+        )
+        if file_path:
+            self.vocal_media_path.set(file_path)
+            if not self.vocal_out_dir.get().strip():
+                self.vocal_out_dir.set(str(Path(file_path).parent))
+            self.vocal_status_label.configure(
+                text=f"Đã chọn: {Path(file_path).name}", text_color="white"
+            )
+
+    def select_vocal_out_dir(self):
+        dir_path = filedialog.askdirectory(title="Chọn thư mục xuất kết quả tách giọng")
+        if dir_path:
+            self.vocal_out_dir.set(dir_path)
+
+    def open_vocal_output_dir(self):
+        target = self.vocal_out_dir.get().strip()
+        if not target and self.vocal_media_path.get().strip():
+            target = str(Path(self.vocal_media_path.get().strip()).parent)
+        if target and os.path.exists(target):
+            os.startfile(target)
+        else:
+            messagebox.showwarning("Cảnh báo", "Thư mục đầu ra chưa được tạo hoặc không tồn tại!")
+
+    def on_start_vocal_separation(self):
+        media_p = self.vocal_media_path.get().strip()
+        if not media_p or not os.path.exists(media_p):
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn tệp video hoặc âm thanh hợp lệ!")
+            return
+
+        cookie = self.vocal_cookie_input.get().strip()
+        if not cookie:
+            messagebox.showwarning(
+                "Yêu cầu tài khoản PRO",
+                "Tính năng tách giọng của CapCut yêu cầu tài khoản PRO!\n"
+                "Vui lòng dán Cookie hoặc sessionid của bạn vào ô 'Tài Khoản CapCut PRO' ở trên.",
+            )
+            return
+
+        # Auto save cookie
+        save_pro_cookie(cookie)
+
+        out_d = self.vocal_out_dir.get().strip()
+        if not out_d:
+            out_d = str(Path(media_p).parent)
+            self.vocal_out_dir.set(out_d)
+
+        # Mode
+        mode_val = self.combo_vocal_mode.get()
+        if "Chỉ lấy Giọng nói" in mode_val:
+            mode = "vocal"
+        elif "Chỉ lấy Nhạc nền" in mode_val:
+            mode = "instrumental"
+        else:
+            mode = "both"
+
+        # Format
+        fmt_val = self.combo_vocal_format.get()
+        out_fmt = "wav" if "WAV" in fmt_val else "mp3"
+
+        # Chunk duration
+        chunk_val = self.combo_vocal_chunk_dur.get()
+        if "5 phút" in chunk_val:
+            chunk_sec = 300
+        elif "14 phút" in chunk_val:
+            chunk_sec = 840
+        else:
+            chunk_sec = 600
+
+        self.vocal_is_running = True
+        self.vocal_cancelled = False
+
+        self.btn_start_vocal.configure(state="disabled")
+        self.btn_cancel_vocal.configure(state="normal")
+        self.vocal_progressbar.set(0.0)
+        self.vocal_status_label.configure(
+            text="Đang khởi động tác vụ tách giọng trên CapCut Cloud...", text_color="white"
+        )
+
+        threading.Thread(
+            target=self.vocal_separation_thread,
+            args=(media_p, out_d, mode, out_fmt, chunk_sec, cookie),
+            daemon=True,
+        ).start()
+
+    def on_cancel_vocal_separation(self):
+        if self.vocal_is_running:
+            self.vocal_cancelled = True
+            self.vocal_status_label.configure(
+                text="Đang huỷ tác vụ, vui lòng chờ...", text_color="#f59e0b"
+            )
+
+    def vocal_separation_thread(
+        self,
+        media_path: str,
+        output_dir: str,
+        mode: str,
+        out_format: str,
+        chunk_sec: int,
+        cookie: str,
+    ):
+        try:
+            separator = CapCutVocalSeparator(cookie=cookie)
+
+            def progress_cb(info):
+                pct = info.get("percent", 0.0) / 100.0
+                msg = info.get("status", "")
+
+                def _ui():
+                    self.vocal_progressbar.set(pct)
+                    self.vocal_status_label.configure(text=msg, text_color="white")
+
+                self.after(0, _ui)
+
+            def cancel_check():
+                return self.vocal_cancelled
+
+            results = separator.separate_media(
+                input_path=media_path,
+                output_dir=output_dir,
+                mode=mode,
+                out_format=out_format,
+                chunk_duration_sec=chunk_sec,
+                progress_callback=progress_cb,
+                cancel_check=cancel_check,
+            )
+
+            def _success_ui():
+                self.vocal_progressbar.set(1.0)
+                self.vocal_status_label.configure(
+                    text="✅ Tách giọng hoàn tất thành công 100%!", text_color="#10b981"
+                )
+                res_lines = [f"- {k.capitalize()}: {Path(v).name}" for k, v in results.items()]
+                res_msg = "\n".join(res_lines)
+                messagebox.showinfo(
+                    "Tách Giọng Hoàn Tất",
+                    f"Đã hoàn thành tách giọng với CapCut Cloud API!\n\nThư mục lưu:\n{output_dir}\n\nTệp đã tạo:\n{res_msg}",
+                )
+
+            self.after(0, _success_ui)
+
+        except Exception as exc:
+            err_text = str(exc)
+
+            def _err_ui():
+                if self.vocal_cancelled:
+                    self.vocal_status_label.configure(
+                        text="⏹ Đã huỷ tác vụ bởi người dùng.", text_color="gray"
+                    )
+                else:
+                    self.vocal_status_label.configure(
+                        text=f"❌ Lỗi: {err_text}", text_color="#ef4444"
+                    )
+                    messagebox.showerror("Lỗi Tách Giọng CapCut", f"Đã xảy ra lỗi:\n{err_text}")
+
+            self.after(0, _err_ui)
+
+        finally:
+            def _reset_ui():
+                self.vocal_is_running = False
+                self.vocal_cancelled = False
+                self.btn_start_vocal.configure(state="normal")
+                self.btn_cancel_vocal.configure(state="disabled")
+
+            self.after(0, _reset_ui)
+
+
 if __name__ == "__main__":
     app = CapCutTTSApp()
     app.mainloop()
+

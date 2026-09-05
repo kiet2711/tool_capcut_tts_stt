@@ -1,0 +1,139 @@
+{
+  "id": "PROJ-TEST",
+  "duration": 16000000,
+  "materials": {
+    "videos": [
+      {
+        "id": "MAT_VIDEO_1",
+        "path": "v1.mp4"
+      },
+      {
+        "id": "MAT_VIDEO_2",
+        "path": "v2.mp4"
+      },
+      {
+        "id": "MAT_VIDEO_3",
+        "path": "v3.mp4"
+      }
+    ],
+    "audios": [],
+    "speeds": [
+      {
+        "id": "SPEED_1",
+        "type": "speed",
+        "speed": 1.0
+      },
+      {
+        "id": "SPEED_2",
+        "type": "speed",
+        "speed": 1.0
+      },
+      {
+        "id": "SPEED_3",
+        "type": "speed",
+        "speed": 1.0
+      }
+    ],
+    "audio_fades": []
+  },
+  "tracks": [
+    {
+      "id": "TRACK_VIDEO_1",
+      "type": "video",
+      "segments": [
+        {
+          "id": "SEG_1",
+          "material_id": "MAT_VIDEO_1",
+          "target_timerange": {
+            "start": 0,
+            "duration": 5000000
+          },
+          "source_timerange": {
+            "start": 0,
+            "duration": 5000000
+          },
+          "speed": 1.0,
+          "volume": 1.0,
+          "extra_material_refs": [
+            "SPEED_1",
+            "EFFECT_FILTER_1"
+          ]
+        },
+        {
+          "id": "SEG_2",
+          "material_id": "MAT_VIDEO_2",
+          "target_timerange": {
+            "start": 5000000,
+            "duration": 5000000
+          },
+          "source_timerange": {
+            "start": 10000000,
+            "duration": 5000000
+          },
+          "speed": 1.0,
+          "volume": 1.0,
+          "extra_material_refs": [
+            "SPEED_2",
+            "EFFECT_FILTER_2"
+          ]
+        },
+        {
+          "id": "SEG_3",
+          "material_id": "MAT_VIDEO_3",
+          "target_timerange": {
+            "start": 10000000,
+            "duration": 6000000
+          },
+          "source_timerange": {
+            "start": 2000000,
+            "duration": 6000000
+          },
+          "speed": 1.0,
+          "volume": 1.0,
+          "extra_material_refs": [
+            "SPEED_3"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TRACK_TEXT_1",
+      "type": "text",
+      "segments": [
+        {
+          "id": "TEXT_SEG_1",
+          "target_timerange": {
+            "start": 1000000,
+            "duration": 3000000
+          },
+          "source_timerange": {
+            "start": 0,
+            "duration": 3000000
+          }
+        },
+        {
+          "id": "TEXT_SEG_2",
+          "target_timerange": {
+            "start": 4500000,
+            "duration": 3000000
+          },
+          "source_timerange": {
+            "start": 0,
+            "duration": 3000000
+          }
+        },
+        {
+          "id": "TEXT_SEG_3",
+          "target_timerange": {
+            "start": 11000000,
+            "duration": 3000000
+          },
+          "source_timerange": {
+            "start": 0,
+            "duration": 3000000
+          }
+        }
+      ]
+    }
+  ]
+}
