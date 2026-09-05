@@ -8,6 +8,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -241,7 +242,8 @@ def stitch_audio_chunks(
     out_format: str = "mp3",
 ) -> str:
     """
-    Stitch multiple audio chunks into a single audio file using FFmpeg concat filter.
+    Stitch multiple audio chunks into a single audio file using direct copy, fast stream copy (-c copy),
+    or fallback to FFmpeg concat re-encode.
     """
     if not chunk_files:
         raise ValueError("Danh sách file chunk trống, không thể ghép nối.")
@@ -251,7 +253,17 @@ def stitch_audio_chunks(
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+    # Case 1: Nếu chỉ có 1 đoạn duy nhất (file <= 15 phút)
     if len(chunk_files) == 1:
+        first_chunk = Path(chunk_files[0])
+        # Nếu file chunk tải về đã cùng định dạng với file đích, copy thẳng ngay lập tức (0.001s)
+        if first_chunk.suffix.lower() == f".{out_format.lower()}":
+            try:
+                shutil.copy2(str(first_chunk), str(output_path))
+                return str(output_path)
+            except Exception:
+                pass
+
         if out_format.lower() == "mp3":
             cmd = [
                 "ffmpeg",
@@ -284,7 +296,7 @@ def stitch_audio_chunks(
         )
         return str(output_path)
 
-    # Multi-chunk concat
+    # Case 2: Nhiều đoạn (> 15 phút) cần ghép nối
     list_file = None
     try:
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", encoding="utf-8") as tf:
@@ -293,6 +305,34 @@ def stitch_audio_chunks(
                 escaped = Path(cf).as_posix()
                 tf.write(f"file '{escaped}'\n")
 
+        # Bước tối ưu 1: Thử ghép bằng Stream Copy (-c copy) trước
+        # Bỏ qua bước giải mã và nén lại của CPU, ghép xong file 1 tiếng chỉ trong ~0.2 giây!
+        copy_cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            list_file,
+            "-c",
+            "copy",
+            str(output_path),
+        ]
+        res_copy = subprocess.run(
+            copy_cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+            timeout=120,
+        )
+        if res_copy.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return str(output_path)
+
+        # Bước dự phòng: Nếu stream copy không thành công (ví dụ khác codec/sample rate), chạy re-encode
         cmd = [
             "ffmpeg",
             "-y",
