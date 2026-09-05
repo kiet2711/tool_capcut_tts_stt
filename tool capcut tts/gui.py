@@ -1265,6 +1265,41 @@ class CapCutTTSApp(ctk.CTk):
         self.combo_vocal_chunk_dur.set("10 phút (Khuyên dùng)")
         self.combo_vocal_chunk_dur.grid(row=1, column=3, padx=5, pady=(0, 8), sticky="w")
 
+        # Row 2: Concurrency / Đa luồng
+        ctk.CTkLabel(
+            self.frame_vocal_options,
+            text="⚡ Đa luồng xử lý:",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=2, column=0, padx=(10, 5), pady=(0, 8), sticky="w")
+
+        self.frame_vocal_threads = ctk.CTkFrame(self.frame_vocal_options, fg_color="transparent")
+        self.frame_vocal_threads.grid(row=2, column=1, padx=5, pady=(0, 8), sticky="w")
+
+        self.slider_threads_vocal = ctk.CTkSlider(
+            self.frame_vocal_threads,
+            from_=1,
+            to=8,
+            number_of_steps=7,
+            command=self.update_threads_vocal_label,
+            width=120,
+        )
+        self.slider_threads_vocal.set(3)
+        self.slider_threads_vocal.grid(row=0, column=0, padx=(0, 5), sticky="w")
+
+        self.label_threads_vocal_val = ctk.CTkLabel(
+            self.frame_vocal_threads,
+            text="3 luồng",
+            font=ctk.CTkFont(weight="bold"),
+        )
+        self.label_threads_vocal_val.grid(row=0, column=1, padx=2, sticky="w")
+
+        ctk.CTkLabel(
+            self.frame_vocal_options,
+            text="💡 Tối ưu video dài (1-2 tiếng): Tách nhiều đoạn cùng lúc, tốc độ tăng gấp 3-5 lần.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        ).grid(row=2, column=2, columnspan=2, padx=(15, 5), pady=(0, 8), sticky="w")
+
         # 4. Khung tiến trình & nút thao tác
         self.frame_vocal_action = ctk.CTkFrame(self.tab_vocal)
         self.frame_vocal_action.grid(row=3, column=0, padx=10, pady=(5, 10), sticky="ew")
@@ -1655,6 +1690,10 @@ class CapCutTTSApp(ctk.CTk):
                     if "threads_stt" in config:
                         self.slider_threads_stt.set(config["threads_stt"])
                         self.label_threads_stt_val.configure(text=f"{config['threads_stt']}")
+
+                    if "threads_vocal" in config and hasattr(self, "slider_threads_vocal"):
+                        self.slider_threads_vocal.set(config["threads_vocal"])
+                        self.label_threads_vocal_val.configure(text=f"{config['threads_vocal']} luồng")
                         
                     if "trans_api_keys" in config and hasattr(self, "trans_api_key_var"):
                         self.trans_api_key_var.set(config["trans_api_keys"])
@@ -1697,6 +1736,7 @@ class CapCutTTSApp(ctk.CTk):
                 "threads_basic": int(self.slider_threads_basic.get()),
                 "threads_srt": int(self.slider_threads_srt.get()),
                 "threads_stt": int(self.slider_threads_stt.get()),
+                "threads_vocal": int(self.slider_threads_vocal.get()) if hasattr(self, "slider_threads_vocal") else 3,
                 "trans_api_keys": self.trans_api_key_var.get() if hasattr(self, "trans_api_key_var") else "",
                 "trans_model": self.trans_model_var.get() if hasattr(self, "trans_model_var") else "gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)",
                 "trans_style": self.trans_style_var.get() if hasattr(self, "trans_style_var") else "",
@@ -1745,6 +1785,10 @@ class CapCutTTSApp(ctk.CTk):
 
     def update_threads_stt_label(self, value):
         self.label_threads_stt_val.configure(text=f"{int(value)}")
+        self.save_sync_config(silent=True)
+
+    def update_threads_vocal_label(self, value):
+        self.label_threads_vocal_val.configure(text=f"{int(value)} luồng")
         self.save_sync_config(silent=True)
 
     def on_voice_changed(self, choice=None):
@@ -3274,6 +3318,9 @@ class CapCutTTSApp(ctk.CTk):
         else:
             chunk_sec = 600
 
+        # Threads
+        num_threads = int(self.slider_threads_vocal.get()) if hasattr(self, "slider_threads_vocal") else 3
+
         self.vocal_is_running = True
         self.vocal_cancelled = False
 
@@ -3286,7 +3333,7 @@ class CapCutTTSApp(ctk.CTk):
 
         threading.Thread(
             target=self.vocal_separation_thread,
-            args=(media_p, out_d, mode, out_fmt, chunk_sec, cookie),
+            args=(media_p, out_d, mode, out_fmt, chunk_sec, num_threads, cookie),
             daemon=True,
         ).start()
 
@@ -3304,6 +3351,7 @@ class CapCutTTSApp(ctk.CTk):
         mode: str,
         out_format: str,
         chunk_sec: int,
+        num_threads: int,
         cookie: str,
     ):
         try:
@@ -3328,6 +3376,7 @@ class CapCutTTSApp(ctk.CTk):
                 mode=mode,
                 out_format=out_format,
                 chunk_duration_sec=chunk_sec,
+                concurrency=num_threads,
                 progress_callback=progress_cb,
                 cancel_check=cancel_check,
             )

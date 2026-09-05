@@ -107,19 +107,16 @@ Phần này ghi chú lại luồng xử lý (Logic Flow) đằng sau mỗi tính
 - **Tệp liên quan:** `gui.py` (Tab 5), `capcut_tts_api/translator.py`
 - **Cơ chế:** Dịch theo ngữ cảnh các khối phụ đề SRT thông qua Gemini AI, bảo toàn 100% timecode và thứ tự câu phụ đề.
 
-### Tab 6: Tách Giọng Nói (CapCut Cloud API PRO)
+### Tab 6: Tách Giọng Nói (AI / Cloud)
 - **Tệp liên quan:** `gui.py` (Tab 6), `capcut_tts_api/vocal_api.py`
 - **Bản chất kỹ thuật:** Sử dụng trực tiếp API tách giọng chính thức của CapCut PC (`/lv/v1/common_task/new`, `req_key: vc_sound_separate`).
-- **Yêu cầu bản quyền:** Tách giọng nói trên CapCut là tính năng VIP/PRO, do đó hệ thống yêu cầu cấu hình **Cookie / Session ID** của tài khoản CapCut PRO.
-  - Hướng dẫn lấy: Đăng nhập `capcut.com` trên trình duyệt -> `F12` -> `Application` -> `Cookies` -> copy giá trị `sessionid`.
-  - Cookie được lưu an toàn tại tệp `capcut_pro_cookie.json` và tự động nạp mỗi khi mở ứng dụng.
-  - Có nút **"Kiểm tra tài khoản"** để kiểm tra tính hợp lệ qua `/passport/account/info/v2/`.
-- **Cơ chế Smart Chunking vượt giới hạn 15 phút:**
-  - CapCut Cloud giới hạn thời lượng xử lý tác vụ âm thanh không quá 15 phút.
-  - Khi file đầu vào dài hơn 15 phút (kể cả video 30 phút, 1 giờ, 2 giờ...), công cụ sẽ:
-    1. Tự động dùng FFmpeg cắt file nguồn thành các phân đoạn ngắn (mặc định 10 phút, hỗ trợ 5 phút, 14 phút).
-    2. Upload từng phân đoạn lên ByteDance VOD để lấy `vid`.
-    3. Gửi request tạo tác vụ `vc_sound_separate` với `separate_type: 2` (Giọng nói) và `separate_type: 1` (Nhạc nền/Beat).
-    4. Polling chờ CapCut hoàn tất và tải về các lát cắt audio đã tách stem từ CDN CapCut.
-    5. Dùng FFmpeg ghép nối tự động (concat filter) các lát cắt lại thành file âm thanh hoàn chỉnh liền mạch không bị lệch tiếng.
+- **Không bắt buộc đăng nhập:** Hỗ trợ tách giọng hoàn toàn miễn phí mà không bắt buộc có Cookie/tài khoản PRO. Nếu có tài khoản PRO, người dùng vẫn có thể dán `sessionid` để được server ưu tiên băng thông.
+- **Cơ chế Đa luồng (Multi-threading) & Smart Chunking cho video dài (1-2 tiếng):**
+  - Khi file đầu vào dài (kể cả video 30 phút, 1 giờ, 2 giờ...), công cụ sẽ:
+    1. Tự động dùng FFmpeg phân đoạn file nguồn thành các lát cắt ngắn (mặc định 10 phút/đoạn).
+    2. Sử dụng ThreadPoolExecutor xử lý **đa luồng song song** (1 đến 8 luồng tùy cấu hình, mặc định 3-5 luồng).
+    3. Mỗi luồng độc lập upload phân đoạn lên ByteDance VOD và gửi request tạo tác vụ `vc_sound_separate` song song trên CapCut Cloud.
+    4. Polling và tải về đồng thời các lát cắt âm thanh đã tách Giọng nói (Vocals) và Nhạc nền (Beat).
+    5. Tự động dùng FFmpeg ghép nối (concat) toàn bộ các phân đoạn lại theo đúng thứ tự thời gian, tạo ra file hoàn chỉnh liền mạch không lệch 1 mili-giây.
+
 

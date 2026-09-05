@@ -4,11 +4,13 @@ Uses CapCut's official backend endpoints (/lv/v1/common_task/new, vc_sound_separ
 with PRO account authentication (Cookie / sessionid) and smart chunking to handle media > 15 minutes.
 """
 
+import concurrent.futures
 import json
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -638,16 +640,17 @@ class CapCutVocalSeparator:
         mode: str = "both",
         out_format: str = "mp3",
         chunk_duration_sec: int = 600,
+        concurrency: int = 3,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, str]:
         """
-        Complete end-to-end pipeline:
+        Complete end-to-end multi-threaded pipeline:
         1. Probes file duration and determines chunking (CapCut 15-min limit safe).
-        2. Extracts audio chunks to temporary WAV slices.
-        3. Calls CapCut Cloud API with PRO credentials for each slice.
-        4. Downloads resulting stems.
-        5. Stitches multi-chunk stems into seamless final media.
+        2. Slices media into WAV chunks.
+        3. Processes chunks concurrently using ThreadPoolExecutor across CapCut Cloud API workers.
+        4. Downloads resulting stems for each chunk.
+        5. Stitches multi-chunk stems chronologically into seamless final media.
         6. Returns output file paths: {'vocal': ..., 'instrumental': ...}.
         """
         if cancel_check and cancel_check():
@@ -678,54 +681,113 @@ class CapCutVocalSeparator:
         num_chunks = max(1, int((total_duration + safe_chunk_sec - 1) // safe_chunk_sec))
         work_dir = tempfile.mkdtemp(prefix="capcut_vocal_")
 
-        vocal_chunks: List[str] = []
-        inst_chunks: List[str] = []
+        vocal_chunks: List[Optional[str]] = [None] * num_chunks
+        inst_chunks: List[Optional[str]] = [None] * num_chunks
 
         try:
+            chunks_info = []
             for idx in range(num_chunks):
+                start_sec = idx * safe_chunk_sec
+                dur_sec = min(safe_chunk_sec, total_duration - start_sec)
+                chunk_wav = str(Path(work_dir) / f"slice_{idx:03d}.wav")
+                chunks_info.append({
+                    "idx": idx,
+                    "start_sec": start_sec,
+                    "dur_sec": dur_sec,
+                    "chunk_wav": chunk_wav,
+                })
+
+            active_workers = min(max(int(concurrency), 1), num_chunks)
+            completed_count = 0
+            lock = threading.Lock()
+
+            if num_chunks > 1:
+                report(4.0, f"Đang khởi tạo {active_workers} luồng xử lý song song cho {num_chunks} phân đoạn...")
+
+            def process_chunk_task(c_info):
+                nonlocal completed_count
+                idx = c_info["idx"]
+                start_sec = c_info["start_sec"]
+                dur_sec = c_info["dur_sec"]
+                chunk_wav = c_info["chunk_wav"]
+
                 if cancel_check and cancel_check():
                     raise CapCutError("Đã huỷ bởi người dùng.")
 
-                start_sec = idx * safe_chunk_sec
-                dur_sec = min(safe_chunk_sec, total_duration - start_sec)
-                chunk_percent_base = 5.0 + (idx / num_chunks) * 80.0
-                chunk_slice_percent = 80.0 / num_chunks
-
-                def chunk_cb(step_msg: str):
-                    report(chunk_percent_base + chunk_slice_percent * 0.5, f"[Đoạn {idx+1}/{num_chunks}] {step_msg}")
-
-                report(
-                    chunk_percent_base,
-                    f"[Đoạn {idx+1}/{num_chunks}] Đang trích xuất audio (từ {int(start_sec)}s đến {int(start_sec + dur_sec)}s)...",
-                )
-
-                chunk_wav = str(Path(work_dir) / f"slice_{idx:03d}.wav")
+                # 1. Trích xuất lát cắt âm thanh bằng FFmpeg
                 extract_audio_slice(input_p, start_sec, dur_sec, chunk_wav)
 
-                # Process chunk with CapCut API
-                res_stems = self.process_single_chunk(
-                    chunk_wav_path=chunk_wav,
-                    duration_sec=dur_sec,
-                    mode=mode,
-                    temp_dir=work_dir,
-                    progress_callback=chunk_cb,
-                    cancel_check=cancel_check,
-                )
+                if cancel_check and cancel_check():
+                    raise CapCutError("Đã huỷ bởi người dùng.")
 
-                if "vocal" in res_stems:
-                    vocal_chunks.append(res_stems["vocal"])
-                if "instrumental" in res_stems:
-                    inst_chunks.append(res_stems["instrumental"])
+                # 2. Xử lý qua CapCut Cloud API bằng worker separator độc lập
+                worker_separator = CapCutVocalSeparator(cookie=self.cookie, client=CapCutClient())
 
-                # Remove intermediate extracted chunk WAV
+                last_err = None
+                for attempt in range(2):
+                    if cancel_check and cancel_check():
+                        raise CapCutError("Đã huỷ bởi người dùng.")
+                    try:
+                        res_stems = worker_separator.process_single_chunk(
+                            chunk_wav_path=chunk_wav,
+                            duration_sec=dur_sec,
+                            mode=mode,
+                            temp_dir=work_dir,
+                            cancel_check=cancel_check,
+                        )
+                        if "vocal" in res_stems:
+                            vocal_chunks[idx] = res_stems["vocal"]
+                        if "instrumental" in res_stems:
+                            inst_chunks[idx] = res_stems["instrumental"]
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if cancel_check and cancel_check():
+                            raise CapCutError("Đã huỷ bởi người dùng.")
+                        time.sleep(1.5)
+
+                if last_err:
+                    raise CapCutError(f"Lỗi xử lý phân đoạn {idx+1}/{num_chunks}: {last_err}")
+
+                # Dọn file slice trung gian
                 if os.path.exists(chunk_wav):
                     try:
                         os.remove(chunk_wav)
                     except Exception:
                         pass
 
+                with lock:
+                    completed_count += 1
+                    pct = 5.0 + (completed_count / num_chunks) * 82.0
+                    msg = (
+                        f"Đa luồng ({active_workers} luồng): Đã tách xong {completed_count}/{num_chunks} đoạn ({int(completed_count / num_chunks * 100)}%)..."
+                        if num_chunks > 1
+                        else "Đã hoàn thành tách giọng từ máy chủ..."
+                    )
+                    report(pct, msg)
+
+            if num_chunks == 1:
+                process_chunk_task(chunks_info[0])
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=active_workers) as executor:
+                    futures = [executor.submit(process_chunk_task, c) for c in chunks_info]
+                    for fut in concurrent.futures.as_completed(futures):
+                        if cancel_check and cancel_check():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            raise CapCutError("Đã huỷ bởi người dùng.")
+                        fut.result()
+
             if cancel_check and cancel_check():
                 raise CapCutError("Đã huỷ bởi người dùng.")
+
+            valid_vocals = [vocal_chunks[i] for i in range(num_chunks) if vocal_chunks[i]]
+            valid_insts = [inst_chunks[i] for i in range(num_chunks) if inst_chunks[i]]
+
+            if mode in ("both", "vocal") and len(valid_vocals) != num_chunks:
+                raise CapCutError(f"Tách giọng nói bị thiếu: chỉ hoàn thành {len(valid_vocals)}/{num_chunks} đoạn.")
+            if mode in ("both", "instrumental") and len(valid_insts) != num_chunks:
+                raise CapCutError(f"Tách nhạc nền bị thiếu: chỉ hoàn thành {len(valid_insts)}/{num_chunks} đoạn.")
 
             report(88.0, "Đang ghép nối và hoàn thiện file âm thanh đầu ra...")
 
@@ -733,16 +795,16 @@ class CapCutVocalSeparator:
             final_outputs: Dict[str, str] = {}
             ext = out_format.lower()
 
-            if vocal_chunks:
+            if valid_vocals:
                 report(92.0, "Đang xuất bản file Giọng Nói (Vocals)...")
                 vocal_out = str(out_d / f"{base_stem}_vocals.{ext}")
-                stitch_audio_chunks(vocal_chunks, vocal_out, out_format=ext)
+                stitch_audio_chunks(valid_vocals, vocal_out, out_format=ext)
                 final_outputs["vocal"] = vocal_out
 
-            if inst_chunks:
+            if valid_insts:
                 report(96.0, "Đang xuất bản file Nhạc Nền (Beat)...")
                 inst_out = str(out_d / f"{base_stem}_instrumental.{ext}")
-                stitch_audio_chunks(inst_chunks, inst_out, out_format=ext)
+                stitch_audio_chunks(valid_insts, inst_out, out_format=ext)
                 final_outputs["instrumental"] = inst_out
 
             report(100.0, "Tách giọng bằng CapCut Cloud API thành công 100%!")
