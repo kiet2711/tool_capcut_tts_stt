@@ -32,8 +32,17 @@ COOKIE_CONFIG_FILE = Path(__file__).resolve().parent.parent / "capcut_pro_cookie
 
 
 def save_pro_cookie(cookie_str: str) -> None:
-    """Save user PRO cookie to persistent configuration file."""
-    data = {"cookie": cookie_str.strip(), "updated_at": int(time.time())}
+    """Save user PRO cookie to persistent configuration file or delete file if empty."""
+    val = cookie_str.strip()
+    if not val:
+        if COOKIE_CONFIG_FILE.exists():
+            try:
+                COOKIE_CONFIG_FILE.unlink()
+            except Exception:
+                pass
+        return
+
+    data = {"cookie": val, "updated_at": int(time.time())}
     with open(COOKIE_CONFIG_FILE, "w", encoding="utf-8") as fp:
         json.dump(data, fp, indent=2, ensure_ascii=False)
 
@@ -174,6 +183,152 @@ def get_media_duration(file_path: Union[str, Path]) -> float:
         pass
 
     return 0.0
+
+
+def trim_audio_to_duration(
+    file_path: Union[str, Path],
+    target_duration: float,
+) -> str:
+    """
+    Trim audio file precisely to target_duration if actual duration exceeds target_duration.
+    Prevents CapCut Cloud STFT padding and MP3 frame padding from accumulating drift across chunks,
+    ensuring 100% frame-accurate lip sync with video.
+    """
+    if target_duration <= 0 or not os.path.exists(file_path):
+        return str(file_path)
+
+    try:
+        actual_dur = get_media_duration(file_path)
+        # If discrepancy is negligible (<= 25ms / less than 1 video frame), no trim needed
+        if actual_dur <= target_duration + 0.025:
+            return str(file_path)
+
+        fp = Path(file_path)
+        temp_trimmed = fp.parent / f"trimmed_{fp.name}"
+
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(fp),
+            "-t",
+            f"{target_duration:.3f}",
+            "-c",
+            "copy",
+            str(temp_trimmed),
+        ]
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+            timeout=120,
+        )
+        if res.returncode == 0 and temp_trimmed.exists() and temp_trimmed.stat().st_size > 0:
+            temp_trimmed.replace(fp)
+            return str(fp)
+        elif temp_trimmed.exists():
+            try:
+                temp_trimmed.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return str(file_path)
+
+
+def remux_video_with_audio(
+    video_path: Union[str, Path],
+    audio_path: Union[str, Path],
+    output_path: Union[str, Path],
+) -> str:
+    """
+    Replace the audio track of video_path with audio_path using ultra-fast stream copy (-c:v copy).
+    Removes the old audio track completely.
+    Takes only a few seconds without video re-encoding.
+    """
+    video_p = Path(video_path)
+    audio_p = Path(audio_path)
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    # 1. Fast Stream Copy attempt: -c:v copy -c:a copy
+    cmd_copy = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_p),
+        "-i",
+        str(audio_p),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        "-shortest",
+        str(out_p),
+    ]
+    res = subprocess.run(
+        cmd_copy,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        startupinfo=startupinfo,
+        timeout=600,
+    )
+    if res.returncode == 0 and out_p.exists() and out_p.stat().st_size > 0:
+        return str(out_p)
+
+    # 2. Fallback: stream copy video, encode audio to AAC (in case container does not support audio codec directly)
+    cmd_fallback = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_p),
+        "-i",
+        str(audio_p),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "320k",
+        "-shortest",
+        str(out_p),
+    ]
+    res_fallback = subprocess.run(
+        cmd_fallback,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        startupinfo=startupinfo,
+        timeout=600,
+    )
+    if res_fallback.returncode != 0 or not out_p.exists():
+        raise CapCutError(f"Lỗi ghép âm thanh vào video (FFmpeg): {res_fallback.stderr}")
+    return str(out_p)
 
 
 def extract_audio_slice(
@@ -708,6 +863,7 @@ class CapCutVocalSeparator:
         out_format: str = "mp3",
         chunk_duration_sec: int = 600,
         concurrency: int = 3,
+        remux_video: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, str]:
@@ -809,6 +965,13 @@ class CapCutVocalSeparator:
                             temp_dir=work_dir,
                             cancel_check=cancel_check,
                         )
+                        # Gọt bỏ phần đệm STFT/MP3 padding dư thừa của CapCut để chống dồn toa lệch hình
+                        for stem_key in ("vocal", "instrumental"):
+                            if stem_key in res_stems and os.path.exists(res_stems[stem_key]):
+                                res_stems[stem_key] = trim_audio_to_duration(
+                                    res_stems[stem_key], dur_sec
+                                )
+
                         if "vocal" in res_stems:
                             vocal_chunks[idx] = res_stems["vocal"]
                         if "instrumental" in res_stems:
@@ -873,15 +1036,29 @@ class CapCutVocalSeparator:
                 report(92.0, "Đang xuất bản file Giọng Nói (Vocals)...")
                 vocal_out = str(out_d / f"{base_stem}_vocals.{ext}")
                 stitch_audio_chunks(valid_vocals, vocal_out, out_format=ext)
+                vocal_out = trim_audio_to_duration(vocal_out, total_duration)
                 final_outputs["vocal"] = vocal_out
 
             if valid_insts:
                 report(96.0, "Đang xuất bản file Nhạc Nền (Beat)...")
                 inst_out = str(out_d / f"{base_stem}_instrumental.{ext}")
                 stitch_audio_chunks(valid_insts, inst_out, out_format=ext)
+                inst_out = trim_audio_to_duration(inst_out, total_duration)
                 final_outputs["instrumental"] = inst_out
 
-            report(100.0, "Tách giọng bằng CapCut Cloud API thành công 100%!")
+            VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv", ".m4v", ".ts"}
+            if remux_video and input_p.suffix.lower() in VIDEO_EXTS:
+                target_audio = final_outputs.get("vocal") or final_outputs.get("instrumental")
+                if target_audio and os.path.exists(target_audio):
+                    report(98.0, "🎬 Đang ghép âm thanh mới vào video gốc (bỏ âm thanh cũ, Stream Copy)...")
+                    label = "vocals" if "vocal" in final_outputs else "instrumental"
+                    remux_out = str(out_d / f"{base_stem}_{label}{input_p.suffix}")
+                    if Path(remux_out).resolve() == input_p.resolve():
+                        remux_out = str(out_d / f"{base_stem}_{label}_remuxed{input_p.suffix}")
+                    remux_video_with_audio(input_p, target_audio, remux_out)
+                    final_outputs["video"] = remux_out
+
+            report(100.0, "Tách giọng và hoàn tất xuất bản thành công 100%!")
             return final_outputs
 
         finally:

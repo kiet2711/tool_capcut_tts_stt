@@ -1110,28 +1110,32 @@ class CapCutTTSApp(ctk.CTk):
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, padx=10, pady=8, sticky="w")
 
+        saved_ck = load_pro_cookie()
+        self.vocal_cookie_var = ctk.StringVar(value=saved_ck)
+        self.vocal_cookie_var.trace_add("write", self.on_vocal_cookie_changed)
+
         self.vocal_cookie_input = ctk.CTkEntry(
             self.frame_vocal_auth,
-            placeholder_text="Không bắt buộc — Để trống để dùng miễn phí, hoặc dán sessionid tài khoản PRO...",
+            textvariable=self.vocal_cookie_var,
+            placeholder_text="Không bắt buộc — Tự động lưu khi nhập/dán, xóa đi sẽ tự hủy lưu...",
             font=ctk.CTkFont(size=12),
         )
         self.vocal_cookie_input.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
-        saved_ck = load_pro_cookie()
-        if saved_ck:
-            self.vocal_cookie_input.insert(0, saved_ck)
 
-        self.btn_save_cookie = ctk.CTkButton(
+        self.btn_clear_cookie = ctk.CTkButton(
             self.frame_vocal_auth,
-            text="💾 Lưu Cookie",
-            width=90,
-            command=self.save_vocal_cookie_gui,
+            text="❌ Xóa",
+            width=70,
+            fg_color="#ef4444",
+            hover_color="#dc2626",
+            command=self.clear_vocal_cookie_gui,
         )
-        self.btn_save_cookie.grid(row=0, column=2, padx=5, pady=8)
+        self.btn_clear_cookie.grid(row=0, column=2, padx=5, pady=8)
 
         self.btn_verify_cookie = ctk.CTkButton(
             self.frame_vocal_auth,
-            text="🔍 Kiểm tra tài khoản",
-            width=130,
+            text="🔍 Kiểm tra",
+            width=110,
             fg_color="#0284c7",
             hover_color="#0369a1",
             command=self.verify_vocal_cookie_gui,
@@ -1142,11 +1146,18 @@ class CapCutTTSApp(ctk.CTk):
         self.frame_vocal_tip.grid(row=1, column=0, columnspan=4, padx=10, pady=(0, 8), sticky="ew")
         self.frame_vocal_tip.grid_columnconfigure(0, weight=1)
 
+        initial_status = (
+            "💾 Đã nạp Cookie đã lưu từ trước (Tự động lưu khi sửa đổi)"
+            if saved_ck
+            else "⚪ Chưa cấu hình tài khoản (Đang dùng chế độ Miễn phí, nhập Cookie sẽ tự lưu)"
+        )
+        initial_color = "#38bdf8" if saved_ck else "gray"
+
         self.vocal_account_status = ctk.CTkLabel(
             self.frame_vocal_tip,
-            text="💡 Gợi ý: Tính năng hoạt động hoàn toàn miễn phí không bắt buộc đăng nhập. Nếu có tài khoản PRO, bạn có thể dán sessionid để hưởng ưu tiên server.",
+            text=initial_status,
             font=ctk.CTkFont(size=11),
-            text_color="gray",
+            text_color=initial_color,
         )
         self.vocal_account_status.grid(row=0, column=0, sticky="w")
 
@@ -1307,6 +1318,17 @@ class CapCutTTSApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color="gray",
         ).grid(row=2, column=2, columnspan=2, padx=(15, 5), pady=(0, 8), sticky="w")
+
+        # Row 3: Tùy chọn tự động ghép vào video gốc
+        self.vocal_remux_video = ctk.BooleanVar(value=False)
+        self.chk_vocal_remux = ctk.CTkCheckBox(
+            self.frame_vocal_options,
+            text="🎬 Tự động ghép âm thanh đã tách vào video gốc (bỏ âm thanh cũ, Stream Copy siêu tốc)",
+            variable=self.vocal_remux_video,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#38bdf8",
+        )
+        self.chk_vocal_remux.grid(row=3, column=0, columnspan=4, padx=10, pady=(2, 8), sticky="w")
 
         # 4. Khung tiến trình & nút thao tác
         self.frame_vocal_action = ctk.CTkFrame(self.tab_vocal)
@@ -3226,13 +3248,30 @@ class CapCutTTSApp(ctk.CTk):
     # Tab 6: Vocal Separation (CapCut Cloud API PRO) Event Handlers
     # =========================================================================
 
-    def save_vocal_cookie_gui(self):
-        cookie = self.vocal_cookie_input.get().strip()
-        if not cookie:
-            messagebox.showwarning("Cảnh báo", "Vui lòng dán Cookie hoặc sessionid của tài khoản CapCut PRO trước khi lưu!")
-            return
+    def on_vocal_cookie_changed(self, *args):
+        cookie = self.vocal_cookie_var.get().strip() if hasattr(self, "vocal_cookie_var") else ""
         save_pro_cookie(cookie)
-        messagebox.showinfo("Đã lưu", "Đã lưu Cookie tài khoản CapCut PRO vào tệp cấu hình!")
+        if hasattr(self, "vocal_account_status"):
+            if not cookie:
+                self.vocal_account_status.configure(
+                    text="⚪ Đã xóa Cookie (Đang dùng chế độ Miễn phí)",
+                    text_color="gray",
+                )
+            else:
+                self.vocal_account_status.configure(
+                    text="💾 Đã tự động lưu Cookie vào tệp cấu hình",
+                    text_color="#38bdf8",
+                )
+
+    def clear_vocal_cookie_gui(self):
+        if hasattr(self, "vocal_cookie_var"):
+            self.vocal_cookie_var.set("")
+        save_pro_cookie("")
+        if hasattr(self, "vocal_account_status"):
+            self.vocal_account_status.configure(
+                text="⚪ Đã xóa Cookie (Đang dùng chế độ Miễn phí)",
+                text_color="gray",
+            )
 
     def verify_vocal_cookie_gui(self):
         cookie = self.vocal_cookie_input.get().strip()
@@ -3337,6 +3376,9 @@ class CapCutTTSApp(ctk.CTk):
         # Threads
         num_threads = int(self.slider_threads_vocal.get()) if hasattr(self, "slider_threads_vocal") else 3
 
+        # Remux video flag
+        remux_video = self.vocal_remux_video.get() if hasattr(self, "vocal_remux_video") else False
+
         self.vocal_is_running = True
         self.vocal_cancelled = False
 
@@ -3349,7 +3391,7 @@ class CapCutTTSApp(ctk.CTk):
 
         threading.Thread(
             target=self.vocal_separation_thread,
-            args=(media_p, out_d, mode, out_fmt, chunk_sec, num_threads, cookie),
+            args=(media_p, out_d, mode, out_fmt, chunk_sec, num_threads, cookie, remux_video),
             daemon=True,
         ).start()
 
@@ -3369,6 +3411,7 @@ class CapCutTTSApp(ctk.CTk):
         chunk_sec: int,
         num_threads: int,
         cookie: str,
+        remux_video: bool = False,
     ):
         try:
             separator = CapCutVocalSeparator(cookie=cookie)
@@ -3393,20 +3436,27 @@ class CapCutTTSApp(ctk.CTk):
                 out_format=out_format,
                 chunk_duration_sec=chunk_sec,
                 concurrency=num_threads,
+                remux_video=remux_video,
                 progress_callback=progress_cb,
                 cancel_check=cancel_check,
             )
 
             def _success_ui():
                 self.vocal_progressbar.set(1.0)
+                status_text = (
+                    "✅ Tách giọng và ghép video hoàn tất thành công 100%!"
+                    if "video" in results
+                    else "✅ Tách giọng hoàn tất thành công 100%!"
+                )
                 self.vocal_status_label.configure(
-                    text="✅ Tách giọng hoàn tất thành công 100%!", text_color="#10b981"
+                    text=status_text, text_color="#10b981"
                 )
                 res_lines = [f"- {k.capitalize()}: {Path(v).name}" for k, v in results.items()]
                 res_msg = "\n".join(res_lines)
+                title = "Tách Giọng & Ghép Video Hoàn Tất" if "video" in results else "Tách Giọng Hoàn Tất"
                 messagebox.showinfo(
-                    "Tách Giọng Hoàn Tất",
-                    f"Đã hoàn thành tách giọng với CapCut Cloud API!\n\nThư mục lưu:\n{output_dir}\n\nTệp đã tạo:\n{res_msg}",
+                    title,
+                    f"Đã hoàn thành tác vụ với CapCut Cloud API!\n\nThư mục lưu:\n{output_dir}\n\nTệp đã tạo:\n{res_msg}",
                 )
 
             self.after(0, _success_ui)
