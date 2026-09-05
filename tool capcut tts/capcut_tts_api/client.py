@@ -854,7 +854,9 @@ class CapCutClient:
                     if cancel_check and cancel_check():
                         raise CapCutError("Đã huỷ bởi người dùng.")
                     try:
-                        worker_client = CapCutClient()
+                        worker_dev = DeviceConfig()
+                        worker_dev.randomize()
+                        worker_client = CapCutClient(device=worker_dev)
                         upload_res = worker_client.upload_audio(c_path)
 
                         stt_task = worker_client.create_stt_task(

@@ -676,7 +676,7 @@ class CapCutVocalSeparator:
             raise CapCutError("Không xác định được thời lượng tệp tin hoặc tệp không chứa âm thanh hợp lệ.")
 
         # CapCut hard ceiling is 15 minutes (900 seconds). Default chunk duration: 600s (10 mins).
-        safe_chunk_sec = min(max(int(chunk_duration_sec), 60), 840)
+        safe_chunk_sec = min(max(int(chunk_duration_sec), 60), 900)
 
         num_chunks = max(1, int((total_duration + safe_chunk_sec - 1) // safe_chunk_sec))
         work_dir = tempfile.mkdtemp(prefix="capcut_vocal_")
@@ -721,7 +721,11 @@ class CapCutVocalSeparator:
                     raise CapCutError("Đã huỷ bởi người dùng.")
 
                 # 2. Xử lý qua CapCut Cloud API bằng worker separator độc lập
-                worker_separator = CapCutVocalSeparator(cookie=self.cookie, client=CapCutClient())
+                # Mỗi luồng tạo một DeviceConfig ngẫu nhiên riêng biệt để tránh bị CapCut xếp hàng chờ theo thiết bị
+                worker_device = DeviceConfig()
+                worker_device.randomize()
+                worker_client = CapCutClient(device=worker_device)
+                worker_separator = CapCutVocalSeparator(cookie=self.cookie, client=worker_client)
 
                 last_err = None
                 for attempt in range(2):

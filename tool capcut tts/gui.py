@@ -1257,10 +1257,17 @@ class CapCutTTSApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         ).grid(row=1, column=2, padx=(15, 5), pady=(0, 8), sticky="w")
 
+        vocal_dur_values = [
+            f"{i} phút (Khuyên dùng)" if i == 10
+            else (f"{i} phút (Tối đa)" if i == 15
+            else f"{i} phút")
+            for i in range(1, 16)
+        ]
         self.combo_vocal_chunk_dur = ctk.CTkComboBox(
             self.frame_vocal_options,
-            values=["10 phút (Khuyên dùng)", "5 phút", "14 phút"],
-            width=150,
+            values=vocal_dur_values,
+            width=170,
+            command=self.on_vocal_chunk_dur_changed,
         )
         self.combo_vocal_chunk_dur.set("10 phút (Khuyên dùng)")
         self.combo_vocal_chunk_dur.grid(row=1, column=3, padx=5, pady=(0, 8), sticky="w")
@@ -1268,7 +1275,7 @@ class CapCutTTSApp(ctk.CTk):
         # Row 2: Concurrency / Đa luồng
         ctk.CTkLabel(
             self.frame_vocal_options,
-            text="⚡ Đa luồng xử lý:",
+            text="⚡ Đa luồng xử lý (1-100):",
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=2, column=0, padx=(10, 5), pady=(0, 8), sticky="w")
 
@@ -1278,24 +1285,25 @@ class CapCutTTSApp(ctk.CTk):
         self.slider_threads_vocal = ctk.CTkSlider(
             self.frame_vocal_threads,
             from_=1,
-            to=8,
-            number_of_steps=7,
+            to=100,
+            number_of_steps=99,
             command=self.update_threads_vocal_label,
-            width=120,
+            width=140,
         )
-        self.slider_threads_vocal.set(3)
+        self.slider_threads_vocal.set(5)
         self.slider_threads_vocal.grid(row=0, column=0, padx=(0, 5), sticky="w")
 
         self.label_threads_vocal_val = ctk.CTkLabel(
             self.frame_vocal_threads,
-            text="3 luồng",
+            text="5 luồng",
             font=ctk.CTkFont(weight="bold"),
+            width=70,
         )
         self.label_threads_vocal_val.grid(row=0, column=1, padx=2, sticky="w")
 
         ctk.CTkLabel(
             self.frame_vocal_options,
-            text="💡 Tối ưu video dài (1-2 tiếng): Tách nhiều đoạn cùng lúc, tốc độ tăng gấp 3-5 lần.",
+            text="💡 Tối ưu video dài (1-2 tiếng): Tách nhiều đoạn cùng lúc, tốc độ tăng gấp nhiều lần.",
             font=ctk.CTkFont(size=11),
             text_color="gray",
         ).grid(row=2, column=2, columnspan=2, padx=(15, 5), pady=(0, 8), sticky="w")
@@ -1692,8 +1700,12 @@ class CapCutTTSApp(ctk.CTk):
                         self.label_threads_stt_val.configure(text=f"{config['threads_stt']}")
 
                     if "threads_vocal" in config and hasattr(self, "slider_threads_vocal"):
-                        self.slider_threads_vocal.set(config["threads_vocal"])
-                        self.label_threads_vocal_val.configure(text=f"{config['threads_vocal']} luồng")
+                        val_vocal = min(100, max(1, int(config["threads_vocal"])))
+                        self.slider_threads_vocal.set(val_vocal)
+                        self.label_threads_vocal_val.configure(text=f"{val_vocal} luồng")
+
+                    if "vocal_chunk_dur" in config and hasattr(self, "combo_vocal_chunk_dur"):
+                        self.combo_vocal_chunk_dur.set(config["vocal_chunk_dur"])
                         
                     if "trans_api_keys" in config and hasattr(self, "trans_api_key_var"):
                         self.trans_api_key_var.set(config["trans_api_keys"])
@@ -1736,7 +1748,8 @@ class CapCutTTSApp(ctk.CTk):
                 "threads_basic": int(self.slider_threads_basic.get()),
                 "threads_srt": int(self.slider_threads_srt.get()),
                 "threads_stt": int(self.slider_threads_stt.get()),
-                "threads_vocal": int(self.slider_threads_vocal.get()) if hasattr(self, "slider_threads_vocal") else 3,
+                "threads_vocal": int(self.slider_threads_vocal.get()) if hasattr(self, "slider_threads_vocal") else 5,
+                "vocal_chunk_dur": self.combo_vocal_chunk_dur.get() if hasattr(self, "combo_vocal_chunk_dur") else "10 phút (Khuyên dùng)",
                 "trans_api_keys": self.trans_api_key_var.get() if hasattr(self, "trans_api_key_var") else "",
                 "trans_model": self.trans_model_var.get() if hasattr(self, "trans_model_var") else "gemini-3.5-flash-lite (Hạn mức 500 RPD - Gộp 1 Request)",
                 "trans_style": self.trans_style_var.get() if hasattr(self, "trans_style_var") else "",
@@ -1789,6 +1802,9 @@ class CapCutTTSApp(ctk.CTk):
 
     def update_threads_vocal_label(self, value):
         self.label_threads_vocal_val.configure(text=f"{int(value)} luồng")
+        self.save_sync_config(silent=True)
+
+    def on_vocal_chunk_dur_changed(self, choice=None):
         self.save_sync_config(silent=True)
 
     def on_voice_changed(self, choice=None):
@@ -3309,13 +3325,13 @@ class CapCutTTSApp(ctk.CTk):
         fmt_val = self.combo_vocal_format.get()
         out_fmt = "wav" if "WAV" in fmt_val else "mp3"
 
-        # Chunk duration
-        chunk_val = self.combo_vocal_chunk_dur.get()
-        if "5 phút" in chunk_val:
-            chunk_sec = 300
-        elif "14 phút" in chunk_val:
-            chunk_sec = 840
-        else:
+        # Chunk duration (1 - 15 minutes)
+        chunk_val = self.combo_vocal_chunk_dur.get().strip()
+        try:
+            min_val = int(chunk_val.split(" ")[0])
+            min_val = min(max(min_val, 1), 15)
+            chunk_sec = min_val * 60
+        except Exception:
             chunk_sec = 600
 
         # Threads
