@@ -657,11 +657,8 @@ class CapCutVocalSeparator:
         if not input_p.exists():
             raise FileNotFoundError(f"Không tìm thấy file nguồn: {input_p}")
 
-        if not self.cookie:
-            raise CapCutError(
-                "Chưa cấu hình Cookie tài khoản CapCut PRO! "
-                "Vui lòng nhập Cookie/SessionID của tài khoản PRO trên giao diện để sử dụng tính năng này."
-            )
+        # Cookie is optional: CapCut Cloud API supports free/guest separation without cookie
+        # If cookie is provided, it will be attached to requests for authenticated/PRO access
 
         out_d = Path(output_dir)
         out_d.mkdir(parents=True, exist_ok=True)

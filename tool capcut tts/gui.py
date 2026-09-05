@@ -764,7 +764,7 @@ class CapCutTTSApp(ctk.CTk):
         self.tab_split = self.tabview.add("Chia Nhỏ Project")
         self.tab_stt = self.tabview.add("Nhận diện (STT)")
         self.tab_trans = self.tabview.add("Dịch Thuật (AI)")
-        self.tab_vocal = self.tabview.add("Tách Giọng Nói (PRO)")
+        self.tab_vocal = self.tabview.add("Tách Giọng Nói (AI)")
         
         # -- Tab 1: Basic TTS --
         self.tab_basic.grid_columnconfigure(0, weight=1)
@@ -1106,13 +1106,13 @@ class CapCutTTSApp(ctk.CTk):
 
         ctk.CTkLabel(
             self.frame_vocal_auth,
-            text="👑 Tài Khoản CapCut PRO:",
+            text="👑 Tài Khoản CapCut (Tùy chọn):",
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, padx=10, pady=8, sticky="w")
 
         self.vocal_cookie_input = ctk.CTkEntry(
             self.frame_vocal_auth,
-            placeholder_text="Dán Cookie hoặc giá trị sessionid của tài khoản CapCut PRO vào đây...",
+            placeholder_text="Không bắt buộc — Để trống để dùng miễn phí, hoặc dán sessionid tài khoản PRO...",
             font=ctk.CTkFont(size=12),
         )
         self.vocal_cookie_input.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
@@ -1144,7 +1144,7 @@ class CapCutTTSApp(ctk.CTk):
 
         self.vocal_account_status = ctk.CTkLabel(
             self.frame_vocal_tip,
-            text="💡 Hướng dẫn: Đăng nhập capcut.com trên trình duyệt -> F12 -> Application -> Cookies -> Copy sessionid.",
+            text="💡 Gợi ý: Tính năng hoạt động hoàn toàn miễn phí không bắt buộc đăng nhập. Nếu có tài khoản PRO, bạn có thể dán sessionid để hưởng ưu tiên server.",
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
@@ -3244,16 +3244,8 @@ class CapCutTTSApp(ctk.CTk):
             return
 
         cookie = self.vocal_cookie_input.get().strip()
-        if not cookie:
-            messagebox.showwarning(
-                "Yêu cầu tài khoản PRO",
-                "Tính năng tách giọng của CapCut yêu cầu tài khoản PRO!\n"
-                "Vui lòng dán Cookie hoặc sessionid của bạn vào ô 'Tài Khoản CapCut PRO' ở trên.",
-            )
-            return
-
-        # Auto save cookie
-        save_pro_cookie(cookie)
+        if cookie:
+            save_pro_cookie(cookie)
 
         out_d = self.vocal_out_dir.get().strip()
         if not out_d:
