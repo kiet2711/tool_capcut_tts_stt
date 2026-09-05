@@ -181,12 +181,15 @@ def extract_audio_slice(
     duration_sec: float,
     output_path: Union[str, Path],
     sample_rate: int = 44100,
+    audio_format: str = "wav",
 ) -> str:
-    """Extract a slice of media to 16-bit stereo WAV with high quality."""
+    """Extract a slice of media to WAV or MP3 with high quality."""
     startupinfo = None
     if os.name == "nt":
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    is_mp3 = str(output_path).lower().endswith(".mp3") or audio_format.lower() == "mp3"
 
     cmd = [
         "ffmpeg",
@@ -198,14 +201,26 @@ def extract_audio_slice(
         "-i",
         str(source_path),
         "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-ac",
-        "2",
-        "-ar",
-        str(sample_rate),
-        str(output_path),
     ]
+    if is_mp3:
+        cmd.extend([
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            "320k",
+            "-ar",
+            str(sample_rate),
+        ])
+    else:
+        cmd.extend([
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            "2",
+            "-ar",
+            str(sample_rate),
+        ])
+    cmd.append(str(output_path))
     res = subprocess.run(
         cmd,
         capture_output=True,
@@ -360,12 +375,16 @@ class CapCutVocalSeparator:
         audio_vid: str,
         duration_ms: int,
         separate_type: int = 2,
+        in_format: str = "wav",
+        out_format: str = "wav",
     ) -> Tuple[str, str, str]:
         """
         Submit a new vocal separation task to CapCut API.
         :param audio_vid: VOD vid from pre-uploaded audio.
         :param duration_ms: Audio duration in milliseconds.
         :param separate_type: 2 for Keep Vocals, 1 for Keep Instrumental/Beat.
+        :param in_format: Audio format uploaded ('wav' or 'mp3').
+        :param out_format: Desired audio format returned from CapCut Cloud ('wav' or 'mp3').
         :return: Tuple of (task_id, token, bind_id)
         """
         device_dict = self.device.to_dict()
@@ -394,8 +413,8 @@ class CapCutVocalSeparator:
                     "source": audio_vid,
                     "source_type": "vid_origin",
                     "format": {
-                        "input": "wav",
-                        "output": "wav",
+                        "input": in_format.lower(),
+                        "output": out_format.lower(),
                     },
                 }
             ],
@@ -508,12 +527,13 @@ class CapCutVocalSeparator:
         chunk_wav_path: str,
         duration_sec: float,
         mode: str = "both",
+        out_format: str = "mp3",
         temp_dir: Optional[str] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, str]:
         """
-        Process separation of a single WAV chunk (< 15 mins) using CapCut API.
+        Process separation of a single audio chunk (< 15 mins) using CapCut API.
         Returns dict: {'vocal': path, 'instrumental': path}
         """
         if cancel_check and cancel_check():
@@ -521,7 +541,7 @@ class CapCutVocalSeparator:
 
         duration_ms = max(int(duration_sec * 1000), 1000)
 
-        # 1. Upload chunk WAV to CapCut VOD
+        # 1. Upload chunk audio to CapCut VOD
         if progress_callback:
             progress_callback("Đang tải âm thanh lên máy chủ CapCut...")
         upload_res = self.client.upload_audio(chunk_wav_path)
@@ -535,6 +555,10 @@ class CapCutVocalSeparator:
         base_name = Path(chunk_wav_path).stem
 
         result_files: Dict[str, str] = {}
+
+        # Auto-detect input format and target cloud output format
+        in_format = "mp3" if str(chunk_wav_path).lower().endswith(".mp3") else "wav"
+        capcut_out_format = "mp3" if out_format.lower() == "mp3" else "wav"
 
         # Mode definitions:
         # separate_type = 2: Keep Vocals
@@ -551,12 +575,14 @@ class CapCutVocalSeparator:
 
             stem_label = "Giọng nói (Vocal)" if stem_name == "vocal" else "Nhạc nền (Beat)"
             if progress_callback:
-                progress_callback(f"Đang gửi yêu cầu tách {stem_label}...")
+                progress_callback(f"Đang gửi yêu cầu tách {stem_label} ({capcut_out_format.upper()})...")
 
             task_id, token, bind_id = self.create_vocal_task(
                 audio_vid=vid,
                 duration_ms=duration_ms,
                 separate_type=sep_type,
+                in_format=in_format,
+                out_format=capcut_out_format,
             )
 
             # Polling task result
@@ -625,11 +651,12 @@ class CapCutVocalSeparator:
 
             # Download separated stem file
             if progress_callback:
-                progress_callback(f"Đang tải về {stem_label}...")
+                progress_callback(f"Đang tải về {stem_label} ({capcut_out_format.upper()})...")
 
-            out_chunk_wav = str(tmp_d / f"{base_name}_{stem_name}.wav")
-            download_remote_file(download_url, out_chunk_wav)
-            result_files[stem_name] = out_chunk_wav
+            stem_ext = capcut_out_format.lower()
+            out_chunk_stem = str(tmp_d / f"{base_name}_{stem_name}.{stem_ext}")
+            download_remote_file(download_url, out_chunk_stem)
+            result_files[stem_name] = out_chunk_stem
 
         return result_files
 
@@ -684,17 +711,19 @@ class CapCutVocalSeparator:
         vocal_chunks: List[Optional[str]] = [None] * num_chunks
         inst_chunks: List[Optional[str]] = [None] * num_chunks
 
+        slice_ext = "mp3" if out_format.lower() == "mp3" else "wav"
+
         try:
             chunks_info = []
             for idx in range(num_chunks):
                 start_sec = idx * safe_chunk_sec
                 dur_sec = min(safe_chunk_sec, total_duration - start_sec)
-                chunk_wav = str(Path(work_dir) / f"slice_{idx:03d}.wav")
+                chunk_file = str(Path(work_dir) / f"slice_{idx:03d}.{slice_ext}")
                 chunks_info.append({
                     "idx": idx,
                     "start_sec": start_sec,
                     "dur_sec": dur_sec,
-                    "chunk_wav": chunk_wav,
+                    "chunk_file": chunk_file,
                 })
 
             active_workers = min(max(int(concurrency), 1), num_chunks)
@@ -709,13 +738,13 @@ class CapCutVocalSeparator:
                 idx = c_info["idx"]
                 start_sec = c_info["start_sec"]
                 dur_sec = c_info["dur_sec"]
-                chunk_wav = c_info["chunk_wav"]
+                chunk_file = c_info["chunk_file"]
 
                 if cancel_check and cancel_check():
                     raise CapCutError("Đã huỷ bởi người dùng.")
 
                 # 1. Trích xuất lát cắt âm thanh bằng FFmpeg
-                extract_audio_slice(input_p, start_sec, dur_sec, chunk_wav)
+                extract_audio_slice(input_p, start_sec, dur_sec, chunk_file, audio_format=slice_ext)
 
                 if cancel_check and cancel_check():
                     raise CapCutError("Đã huỷ bởi người dùng.")
@@ -733,9 +762,10 @@ class CapCutVocalSeparator:
                         raise CapCutError("Đã huỷ bởi người dùng.")
                     try:
                         res_stems = worker_separator.process_single_chunk(
-                            chunk_wav_path=chunk_wav,
+                            chunk_wav_path=chunk_file,
                             duration_sec=dur_sec,
                             mode=mode,
+                            out_format=out_format,
                             temp_dir=work_dir,
                             cancel_check=cancel_check,
                         )
@@ -755,9 +785,9 @@ class CapCutVocalSeparator:
                     raise CapCutError(f"Lỗi xử lý phân đoạn {idx+1}/{num_chunks}: {last_err}")
 
                 # Dọn file slice trung gian
-                if os.path.exists(chunk_wav):
+                if os.path.exists(chunk_file):
                     try:
-                        os.remove(chunk_wav)
+                        os.remove(chunk_file)
                     except Exception:
                         pass
 
