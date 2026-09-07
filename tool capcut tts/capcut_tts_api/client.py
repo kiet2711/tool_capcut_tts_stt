@@ -227,11 +227,11 @@ class CapCutClient:
             # Add automatic retry for network errors and 5xx responses
             retry_strategy = Retry(
                 total=5,  # Maximum number of retries
-                backoff_factor=2,  # Wait 2s, 4s, 8s... between retries
+                backoff_factor=1.5,  # Wait 1.5s, 3s... between retries
                 status_forcelist=[500, 502, 503, 504],
                 allowed_methods=["HEAD", "GET", "OPTIONS", "POST"] # Crucial: Must allow POST
             )
-            adapter = HTTPAdapter(max_retries=retry_strategy)
+            adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=300, pool_maxsize=300)
             self.session.mount("http://", adapter)
             self.session.mount("https://", adapter)
         else:
@@ -734,7 +734,7 @@ class CapCutClient:
                     if cancel_check and cancel_check():
                         raise CapCutError("Đã huỷ bởi người dùng.")
                     try:
-                        worker_client = CapCutClient()
+                        worker_client = CapCutClient(session=self.session)
                         upload_res = worker_client.upload_audio(target_file)
 
                         if progress_callback:
@@ -856,7 +856,7 @@ class CapCutClient:
                     try:
                         worker_dev = DeviceConfig()
                         worker_dev.randomize()
-                        worker_client = CapCutClient(device=worker_dev)
+                        worker_client = CapCutClient(device=worker_dev, session=self.session)
                         upload_res = worker_client.upload_audio(c_path)
 
                         stt_task = worker_client.create_stt_task(

@@ -1930,7 +1930,8 @@ class CapCutTTSApp(ctk.CTk):
                  audio_base64 = task_data["audio"]
 
         if video_url:
-            resp = requests.get(video_url, timeout=60)
+            session = getattr(getattr(self, "client", None), "session", None) or requests
+            resp = session.get(video_url, timeout=60)
             resp.raise_for_status()
             with open(save_path, "wb") as f:
                 f.write(resp.content)
@@ -1947,11 +1948,16 @@ class CapCutTTSApp(ctk.CTk):
                 self.after(0, lambda: self.label_status.configure(text=f"Đang tổng hợp bằng Edge TTS...", text_color="orange"))
                 generate_edge_tts_sync(text, voice_type, rate_str, save_path, cancel_check=lambda: self.is_cancelled)
             else:
+                last_basic_status_time = 0.0
                 def on_status(status):
+                    nonlocal last_basic_status_time
                     if self.is_cancelled:
                         return False
                     if status not in ("success", "succeed"):
-                        self.after(0, lambda s=status: self.label_status.configure(text=f"Đang chờ CapCut xử lý ({s})...", text_color="orange"))
+                        now = time.time()
+                        if now - last_basic_status_time >= 0.25:
+                            last_basic_status_time = now
+                            self.after(0, lambda s=status: self.label_status.configure(text=f"Đang chờ CapCut xử lý ({s})...", text_color="orange"))
                 
                 import re
                 import tempfile
@@ -1998,12 +2004,13 @@ class CapCutTTSApp(ctk.CTk):
                 temp_files = [None] * len(chunks)
                 completed_count = 0
                 lock = threading.Lock()
+                last_chunk_ui_time = 0.0
                 
                 cache_dir = os.path.join(tempfile.gettempdir(), "capcut_tts_cache")
                 os.makedirs(cache_dir, exist_ok=True)
                 
                 def process_chunk(index, chunk_text):
-                    nonlocal completed_count
+                    nonlocal completed_count, last_chunk_ui_time
                     if self.is_cancelled:
                         return
                         
@@ -2018,7 +2025,10 @@ class CapCutTTSApp(ctk.CTk):
                                 with lock:
                                     completed_count += 1
                                     current = completed_count
-                                self.after(0, lambda c=current, t=len(chunks): self.label_status.configure(text=f"Đã xử lý xong {c}/{t} đoạn (từ bộ nhớ đệm)...", text_color="orange"))
+                                    now = time.time()
+                                    if current == len(chunks) or (now - last_chunk_ui_time >= 0.08):
+                                        last_chunk_ui_time = now
+                                        self.after(0, lambda c=current, t=len(chunks): self.label_status.configure(text=f"Đã xử lý xong {c}/{t} đoạn (từ bộ nhớ đệm)...", text_color="orange"))
                                 return
                         except Exception:
                             pass
@@ -2029,7 +2039,10 @@ class CapCutTTSApp(ctk.CTk):
                     with lock:
                         completed_count += 1
                         current = completed_count
-                    self.after(0, lambda c=current, t=len(chunks): self.label_status.configure(text=f"Đã xử lý xong {c}/{t} đoạn âm thanh...", text_color="orange"))
+                        now = time.time()
+                        if current == len(chunks) or (now - last_chunk_ui_time >= 0.08):
+                            last_chunk_ui_time = now
+                            self.after(0, lambda c=current, t=len(chunks): self.label_status.configure(text=f"Đã xử lý xong {c}/{t} đoạn âm thanh...", text_color="orange"))
                 
                 num_threads = min(len(chunks), int(self.slider_threads_basic.get()) if hasattr(self, "slider_threads_basic") else 20)
                 self.after(0, lambda: self.label_status.configure(text=f"Đang bắt đầu xử lý {len(chunks)} đoạn với {num_threads} luồng...", text_color="orange"))
@@ -2232,9 +2245,11 @@ class CapCutTTSApp(ctk.CTk):
             
             completed = 0
             lock = threading.Lock()
+            last_status_time = 0.0
+            last_progress_time = 0.0
             
             def process_sub(i, sub):
-                nonlocal completed
+                nonlocal completed, last_status_time, last_progress_time
                 if self.is_cancelled:
                     return None
                 text = sub.text.replace("\n", " ").strip()
@@ -2264,9 +2279,15 @@ class CapCutTTSApp(ctk.CTk):
                                     
                             with lock:
                                 completed += 1
-                                progress_val = completed / total
-                                self.after(0, lambda pv=progress_val: self.progressbar.set(pv))
-                                self.after(0, lambda c=completed, t=total: self.label_progress.configure(text=f"Tiến độ: {c} / {t} câu"))
+                                cur_c = completed
+                                pv = cur_c / total
+                                now = time.time()
+                                if cur_c == total or (now - last_progress_time >= 0.08):
+                                    last_progress_time = now
+                                    self.after(0, lambda p=pv, c=cur_c, t=total: (
+                                        self.progressbar.set(p),
+                                        self.label_progress.configure(text=f"Tiến độ: {c} / {t} câu")
+                                    ))
                             return {
                                 "index": i,
                                 "path": save_path,
@@ -2279,19 +2300,26 @@ class CapCutTTSApp(ctk.CTk):
                     except Exception:
                         pass
                 
-                local_client = CapCutClient(device=self.client.device)
+                local_client = CapCutClient(device=self.client.device, session=self.client.session)
                 
                 try:
                     if voice_type.startswith("vi-VN-"):
                         rate_str = format_edge_tts_rate(float(rate))
-                        self.after(0, lambda: self.label_status.configure(text=f"Câu {i+1} đang tổng hợp bằng Edge TTS...", text_color="orange"))
+                        now = time.time()
+                        if now - last_status_time >= 0.25:
+                            last_status_time = now
+                            self.after(0, lambda idx=i+1: self.label_status.configure(text=f"Câu {idx} đang tổng hợp bằng Edge TTS...", text_color="orange"))
                         generate_edge_tts_sync(text, voice_type, rate_str, save_path, cancel_check=lambda: self.is_cancelled)
                     else:
                         def on_status(status):
+                            nonlocal last_status_time
                             if self.is_cancelled:
                                 return False
                             if status not in ("success", "succeed"):
-                                self.after(0, lambda s=status: self.label_status.configure(text=f"Câu {i+1} đang chờ CapCut ({s})...", text_color="orange"))
+                                now = time.time()
+                                if now - last_status_time >= 0.25:
+                                    last_status_time = now
+                                    self.after(0, lambda s=status, idx=i+1: self.label_status.configure(text=f"Câu {idx} đang chờ CapCut ({s})...", text_color="orange"))
                         
                         result = local_client.generate_speech(texts=text, voice=voice_type, rate=rate, wait=True, status_callback=on_status)
                         self.download_audio_from_api(result, save_path)
@@ -2345,15 +2373,25 @@ class CapCutTTSApp(ctk.CTk):
                 
                 with lock:
                     completed += 1
-                    progress_val = completed / total
-                    self.after(0, lambda pv=progress_val: self.progressbar.set(pv))
-                    self.after(0, lambda c=completed, t=total: self.label_progress.configure(text=f"Tiến độ: {c} / {t} câu"))
+                    cur_completed = completed
+                    progress_val = cur_completed / total
+                    now = time.time()
                     
-                    if val_id_blocks > 0 and completed % val_id_blocks == 0:
+                    if val_id_blocks > 0 and cur_completed % val_id_blocks == 0:
                         self.client.device.randomize()
-                        self.after(0, lambda c=completed: self.label_status.configure(text=f"Đã tạo {c} câu. Vừa đổi Device ID mới!"))
+                        status_msg = f"Đã tạo {cur_completed} câu. Vừa đổi Device ID mới!"
+                        force_ui = True
                     else:
-                        self.after(0, lambda txt=text: self.label_status.configure(text=f"Vừa tạo xong: {txt[:30]}..."))
+                        status_msg = f"Vừa tạo xong ({cur_completed}/{total}): {text[:30]}..."
+                        force_ui = False
+                    
+                    if cur_completed == total or force_ui or (now - last_progress_time >= 0.08):
+                        last_progress_time = now
+                        def _update_ui(pv=progress_val, c=cur_completed, t=total, msg=status_msg):
+                            self.progressbar.set(pv)
+                            self.label_progress.configure(text=f"Tiến độ: {c} / {t} câu")
+                            self.label_status.configure(text=msg)
+                        self.after(0, _update_ui)
                 
                 return {
                     "index": i,
@@ -2425,7 +2463,7 @@ class CapCutTTSApp(ctk.CTk):
 
                 def generate_single_item(item, new_text):
                     save_path = item["save_path"]
-                    local_client = CapCutClient(device=self.client.device)
+                    local_client = CapCutClient(device=self.client.device, session=self.client.session)
                     try:
                         if voice_type.startswith("vi-VN-"):
                             rate_str = format_edge_tts_rate(float(rate))
@@ -2688,7 +2726,7 @@ class CapCutTTSApp(ctk.CTk):
 
         def generate_single_item(item, new_text):
             save_path = item["save_path"]
-            local_client = CapCutClient(device=self.client.device)
+            local_client = CapCutClient(device=self.client.device, session=self.client.session)
             try:
                 if voice_type.startswith("vi-VN-"):
                     rate_str = format_edge_tts_rate(float(rate))
