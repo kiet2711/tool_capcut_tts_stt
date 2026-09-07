@@ -3048,6 +3048,8 @@ class CapCutTTSApp(ctk.CTk):
 
     def on_stop_translate(self):
         self.is_cancelled = True
+        self._trans_active = False
+        self._pending_trans_result = None
         self.label_status.configure(text="Đang dừng quá trình dịch...", text_color="orange")
 
     def on_start_translate(self):
@@ -3068,6 +3070,9 @@ class CapCutTTSApp(ctk.CTk):
         self.btn_start_trans.configure(state="disabled", text="Đang dịch...")
         self.btn_stop_trans.configure(state="normal")
         self.is_cancelled = False
+        self._trans_active = True
+        self._pending_trans_result = None
+        self._trans_update_scheduled = False
         self.trans_progressbar.set(0)
         self.trans_result_output.delete("1.0", "end")
 
@@ -3126,15 +3131,21 @@ class CapCutTTSApp(ctk.CTk):
                     cancel_check=check_cancelled
                 )
 
+            self._trans_active = False
+            self._pending_trans_result = None
             self.after(0, lambda t=final_text: self._update_trans_result(t))
             self.after(0, lambda: self.trans_progressbar.set(1.0))
             self.after(0, lambda: self.label_status.configure(text="🎉 Đã dịch hoàn tất 100%!", text_color="green"))
             self.after(0, lambda: messagebox.showinfo("Thành công", "Đã dịch hoàn tất toàn bộ nội dung!"))
 
         except Exception as e:
+            self._trans_active = False
+            self._pending_trans_result = None
             self.after(0, lambda e=e: self.label_status.configure(text=f"Lỗi: {e}", text_color="red"))
             self.after(0, lambda e=e: messagebox.showerror("Lỗi dịch thuật", f"Có lỗi xảy ra trong quá trình dịch:\n{e}"))
         finally:
+            self._trans_active = False
+            self._pending_trans_result = None
             if translator:
                 translator.close()
             self.after(0, lambda: self.btn_start_trans.configure(state="normal", text="⚡ Bắt đầu Dịch"))
@@ -3142,6 +3153,8 @@ class CapCutTTSApp(ctk.CTk):
 
     def _schedule_trans_result_update(self, text):
         """Throttle live UI updates to 5 times per second to prevent Tkinter freezing."""
+        if not getattr(self, "_trans_active", False):
+            return
         self._pending_trans_result = text
         if getattr(self, "_trans_update_scheduled", False):
             return
@@ -3150,6 +3163,9 @@ class CapCutTTSApp(ctk.CTk):
 
     def _flush_trans_result(self):
         self._trans_update_scheduled = False
+        if not getattr(self, "_trans_active", False):
+            self._pending_trans_result = None
+            return
         text = getattr(self, "_pending_trans_result", None)
         if text is not None:
             self._update_trans_result(text)

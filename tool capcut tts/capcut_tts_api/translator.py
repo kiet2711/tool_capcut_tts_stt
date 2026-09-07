@@ -130,38 +130,80 @@ def normalize_timecode(timecode: str) -> str:
 
 
 def parse_srt(srt_content: str) -> List[SrtItem]:
-    """Parse SRT string into list of SrtItem objects."""
+    """
+    Robust SRT parser:
+    - Strips code blocks and AI preambles
+    - Matches timecode lines with flexible regex anchors
+    - Handles various ID formats (e.g. 1, 1., #1, [1], 1:)
+    - Accurately captures multi-line subtitle text
+    """
     if not srt_content or not isinstance(srt_content, str):
         return []
 
     cleaned = re.sub(r"```(?:srt)?", "", srt_content, flags=re.IGNORECASE)
     cleaned = cleaned.replace("```", "")
     normalized = cleaned.replace("\r\n", "\n").replace("\r", "\n").strip()
-    blocks = re.split(r"\n\s*\n+", normalized)
+
+    tc_regex = re.compile(
+        r"^[ \t]*(?:(?P<id_line>(?:\[|\#)?\d+(?:\]|\.|\:)?)[ \t]*\n[ \t]*)?"
+        r"(?P<timecode>\d{1,2}:\d{1,2}:\d{1,2}(?:[,\.]\d{1,3})?\s*-->\s*\d{1,2}:\d{1,2}:\d{1,2}(?:[,\.]\d{1,3})?)",
+        re.MULTILINE
+    )
+
+    matches = list(tc_regex.finditer(normalized))
+    if not matches:
+        blocks = re.split(r"\n\s*\n+", normalized)
+        items = []
+        for idx, block in enumerate(blocks):
+            lines = [line.strip() for line in block.strip().split("\n") if line.strip()]
+            if len(lines) >= 2:
+                item_id = idx + 1
+                tc_idx = 0
+                clean_first = re.sub(r"[^\d]", "", lines[0])
+                if clean_first:
+                    item_id = int(clean_first)
+                    tc_idx = 1
+                if tc_idx < len(lines) and "-->" in lines[tc_idx]:
+                    tc = normalize_timecode(lines[tc_idx])
+                    txt = "\n".join(lines[tc_idx + 1:]).strip()
+                    items.append(SrtItem(id=item_id, timecode=tc, original_text=txt, translated_text=""))
+        return items
+
     items = []
+    for i, m in enumerate(matches):
+        start_pos = m.end()
+        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(normalized)
 
-    for idx, block in enumerate(blocks):
-        lines = [line.strip() for line in block.strip().split("\n") if line.strip()]
-        if len(lines) >= 2:
-            item_id = idx + 1
-            timecode_idx = 0
-            if lines[0].isdigit():
-                item_id = int(lines[0])
-                timecode_idx = 1
+        raw_tc = m.group("timecode")
+        timecode = normalize_timecode(raw_tc)
 
-            if timecode_idx < len(lines) and "-->" in lines[timecode_idx]:
-                raw_timecode = lines[timecode_idx]
-                timecode = normalize_timecode(raw_timecode)
-                text_lines = lines[timecode_idx + 1 :]
-                original_text = "\n".join(text_lines).strip()
-                items.append(
-                    SrtItem(
-                        id=item_id,
-                        timecode=timecode,
-                        original_text=original_text,
-                        translated_text="",
-                    )
-                )
+        id_line = m.group("id_line")
+        if id_line:
+            id_digits = re.sub(r"[^\d]", "", id_line)
+            item_id = int(id_digits) if id_digits else i + 1
+        else:
+            pre_text = normalized[:m.start()].rstrip()
+            pre_lines = pre_text.split("\n")
+            if pre_lines and re.match(r"^[ \t]*(?:\[|\#)?\d+(?:\]|\.|\:)?[ \t]*$", pre_lines[-1]):
+                id_digits = re.sub(r"[^\d]", "", pre_lines[-1])
+                item_id = int(id_digits) if id_digits else i + 1
+            else:
+                item_id = i + 1
+
+        text_block = normalized[start_pos:end_pos].strip()
+        lines = [line.rstrip() for line in text_block.split("\n")]
+        if i + 1 < len(matches) and lines and re.match(r"^[ \t]*(?:\[|\#)?\d+(?:\]|\.|\:)?[ \t]*$", lines[-1]):
+            lines.pop()
+        subtitle_text = "\n".join(lines).strip()
+
+        items.append(
+            SrtItem(
+                id=item_id,
+                timecode=timecode,
+                original_text=subtitle_text,
+                translated_text="",
+            )
+        )
 
     return items
 
@@ -451,6 +493,13 @@ class GeminiTranslator:
                 "temperature": 0.2,
                 "maxOutputTokens": 8192,
             },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+            ],
         }
         if system_instruction:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
@@ -465,10 +514,18 @@ class GeminiTranslator:
             raise err
 
         data = resp.json()
+        prompt_feedback = data.get("promptFeedback", {})
+        if prompt_feedback.get("blockReason"):
+            raise RuntimeError(f"Gemini API chặn nội dung (blockReason: {prompt_feedback.get('blockReason')}).")
+
         candidate = data.get("candidates", [{}])[0] if data.get("candidates") else {}
+        finish_reason = candidate.get("finishReason", "")
+        if finish_reason == "SAFETY":
+            raise RuntimeError("Gemini API chặn nội dung do bộ lọc an toàn (finishReason: SAFETY).")
+
         text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "") if candidate.get("content") else ""
         if not text:
-            raise ValueError("API không trả về nội dung dịch hợp lệ.")
+            raise ValueError(f"API không trả về nội dung dịch hợp lệ (finishReason: {finish_reason or 'UNKNOWN'}).")
         return text.strip()
 
     def translate_srt(
@@ -537,9 +594,11 @@ class GeminiTranslator:
 
                 # Context Overlap aligned 100% with truyen-ngan
                 context_prefix = ""
+                overlap_tcs = set()
                 if prev_chunk_items and len(prev_chunk_items) > 0:
                     overlap_items = prev_chunk_items[-3:]
                     overlap_lines = "\n".join([f"{it.timecode}: {it.original_text}" for it in overlap_items if it.original_text])
+                    overlap_tcs = {normalize_timecode(it.timecode) for it in overlap_items}
                     if overlap_lines:
                         context_prefix = f"[BỐI CẢNH 3 CÂU LIỀN TRƯỚC ĐỂ BẠN NẮM VỮNG ĐẠI TỪ XƯNG HÔ VÀ MẠCH CẢM XÚC - TUYỆT ĐỐI KHÔNG DỊCH LẠI CÁC CÂU NÀY]:\n{overlap_lines}\n\n"
 
@@ -560,7 +619,7 @@ class GeminiTranslator:
 
                 success = False
                 retry_attempts = 0
-                max_retries = max(3, min(len(self.api_keys), 6))
+                max_retries = max(5, len(self.api_keys) + 1)
 
                 while not success and retry_attempts < max_retries and not self.is_cancelled and (not cancel_check or not cancel_check()):
                     try:
@@ -572,25 +631,77 @@ class GeminiTranslator:
                         )
                         parsed_trans = parse_srt(trans_text)
 
-                        # Match translations by id, timecode, or sequential position
-                        for local_idx, item in enumerate(chunk_items):
-                            matched = None
-                            for pt in parsed_trans:
-                                if pt.id == item.id:
-                                    matched = pt
-                                    break
-                            if not matched:
-                                for pt in parsed_trans:
-                                    if pt.timecode == item.timecode:
-                                        matched = pt
-                                        break
-                            if not matched and local_idx < len(parsed_trans):
-                                matched = parsed_trans[local_idx]
+                        # Filter out translated overlap lines if model translated them anyway
+                        chunk_tcs = {normalize_timecode(it.timecode) for it in chunk_items}
+                        if overlap_tcs:
+                            filtered_trans = [
+                                pt for pt in parsed_trans
+                                if not (normalize_timecode(pt.timecode) in overlap_tcs and normalize_timecode(pt.timecode) not in chunk_tcs)
+                            ]
+                            if filtered_trans:
+                                parsed_trans = filtered_trans
 
-                            if matched and matched.original_text:
-                                item.translated_text = matched.original_text
-                            elif matched and matched.translated_text:
-                                item.translated_text = matched.translated_text
+                        # Reset translated_text on chunk_items before matching
+                        for it in chunk_items:
+                            it.translated_text = ""
+
+                        # 4-tier subtitle matching:
+                        # 1. Exact ID match (pt.id == item.id)
+                        # 2. Local 1-based index match (pt.id == local_idx + 1)
+                        # 3. Normalized timecode match
+                        # 4. Sequential index fallback
+                        used_pt_indices = set()
+
+                        # Tier 1: exact ID match
+                        for local_idx, item in enumerate(chunk_items):
+                            for p_idx, pt in enumerate(parsed_trans):
+                                if p_idx not in used_pt_indices and pt.id == item.id:
+                                    used_pt_indices.add(p_idx)
+                                    item.translated_text = pt.original_text or pt.translated_text
+                                    break
+
+                        # Tier 2: timecode match (normalize_timecode(item.timecode) == normalize_timecode(pt.timecode))
+                        for local_idx, item in enumerate(chunk_items):
+                            if item.translated_text:
+                                continue
+                            item_tc = normalize_timecode(item.timecode)
+                            for p_idx, pt in enumerate(parsed_trans):
+                                if p_idx not in used_pt_indices and normalize_timecode(pt.timecode) == item_tc:
+                                    used_pt_indices.add(p_idx)
+                                    item.translated_text = pt.original_text or pt.translated_text
+                                    break
+
+                        # Tier 3: local index match (pt.id == local_idx + 1)
+                        for local_idx, item in enumerate(chunk_items):
+                            if item.translated_text:
+                                continue
+                            for p_idx, pt in enumerate(parsed_trans):
+                                if p_idx not in used_pt_indices and pt.id == local_idx + 1:
+                                    used_pt_indices.add(p_idx)
+                                    item.translated_text = pt.original_text or pt.translated_text
+                                    break
+
+                        # Tier 4: sequential fallback
+                        unused_pt = [p_idx for p_idx in range(len(parsed_trans)) if p_idx not in used_pt_indices]
+                        u_idx = 0
+                        for local_idx, item in enumerate(chunk_items):
+                            if item.translated_text:
+                                continue
+                            if u_idx < len(unused_pt):
+                                pt = parsed_trans[unused_pt[u_idx]]
+                                u_idx += 1
+                                item.translated_text = pt.original_text or pt.translated_text
+
+                        # Validation: check translated line ratio
+                        translated_count = sum(1 for it in chunk_items if it.translated_text and it.translated_text.strip())
+                        min_required = 1 if len(chunk_items) == 1 else math.ceil(len(chunk_items) * 0.5)
+                        if translated_count < min_required:
+                            for it in chunk_items:
+                                it.translated_text = ""
+                            raise RuntimeError(
+                                f"Phần {chunk_index + 1} chỉ nhận diện được {translated_count}/{len(chunk_items)} dòng dịch. "
+                                f"Tự động chuyển API key và dịch lại..."
+                            )
 
                         with lock:
                             completed_chunks += 1
@@ -623,7 +734,7 @@ class GeminiTranslator:
                         if retry_attempts >= max_retries:
                             raise RuntimeError(f"Luồng #{worker_id + 1} không thể dịch phần {chunk_index + 1}: {err}")
 
-                        time.sleep(0.5)
+                        time.sleep(min(2.0, 0.5 * retry_attempts))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(run_worker, w) for w in range(num_workers)]
@@ -721,7 +832,7 @@ class GeminiTranslator:
 
                 success = False
                 retry_attempts = 0
-                max_retries = max(3, min(len(self.api_keys), 6))
+                max_retries = max(5, len(self.api_keys) + 1)
 
                 while not success and retry_attempts < max_retries and not self.is_cancelled and (not cancel_check or not cancel_check()):
                     try:
@@ -731,8 +842,12 @@ class GeminiTranslator:
                             api_key=current_key,
                             model=self.model,
                         )
+                        res_clean = res_text.strip()
+                        if not res_clean:
+                            raise RuntimeError(f"API trả về đoạn dịch trống cho đoạn {chunk_index + 1}.")
+
                         with lock:
-                            translated_chunks[chunk_index] = res_text.strip()
+                            translated_chunks[chunk_index] = res_clean
                             completed_chunks += 1
                             success = True
                             if progress_callback:
@@ -760,7 +875,7 @@ class GeminiTranslator:
                         if retry_attempts >= max_retries:
                             raise RuntimeError(f"Luồng #{worker_id + 1} không thể dịch đoạn {chunk_index + 1}: {err}")
 
-                        time.sleep(0.5)
+                        time.sleep(min(2.0, 0.5 * retry_attempts))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(run_worker, w) for w in range(num_workers)]
@@ -772,4 +887,9 @@ class GeminiTranslator:
                 fut.result()
 
         self.is_translating = False
+
+        missing_indices = [i + 1 for i, c in enumerate(translated_chunks) if not c or not c.strip()]
+        if missing_indices:
+            raise RuntimeError(f"Dịch chưa hoàn tất: Thiếu các đoạn {missing_indices} trong văn bản!")
+
         return "\n\n".join([c for c in translated_chunks if c])
