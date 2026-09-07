@@ -1057,7 +1057,7 @@ class CapCutTTSApp(ctk.CTk):
 
         self.trans_source_input = ctk.CTkTextbox(self.frame_trans_main, font=ctk.CTkFont(size=13))
         self.trans_source_input.grid(row=1, column=0, padx=(0, 5), pady=0, sticky="nsew")
-        self.trans_source_input.bind("<KeyRelease>", lambda event: self.update_trans_estimate())
+        self.trans_source_input.bind("<KeyRelease>", lambda event: self.on_trans_source_key_release())
 
         # Right: Result
         self.frame_result_header = ctk.CTkFrame(self.frame_trans_main, fg_color="transparent")
@@ -2939,6 +2939,14 @@ class CapCutTTSApp(ctk.CTk):
         self.trans_style_var.set(preset_val)
         self.save_sync_config(silent=True)
 
+    def on_trans_source_key_release(self):
+        if hasattr(self, "_trans_debounce_timer") and self._trans_debounce_timer:
+            try:
+                self.after_cancel(self._trans_debounce_timer)
+            except Exception:
+                pass
+        self._trans_debounce_timer = self.after(350, self.update_trans_estimate)
+
     def update_trans_estimate(self):
         if not hasattr(self, "trans_source_input") or not hasattr(self, "lbl_trans_estimate"):
             return
@@ -3070,6 +3078,7 @@ class CapCutTTSApp(ctk.CTk):
         ).start()
 
     def translate_worker_thread(self, source_text, api_keys_str, model, style, concurrency):
+        translator = None
         try:
             translator = GeminiTranslator(api_keys=api_keys_str, model=model)
             is_srt = is_srt_content(source_text)
@@ -3081,7 +3090,7 @@ class CapCutTTSApp(ctk.CTk):
                 self.after(0, lambda pv=prog: self.trans_progressbar.set(pv))
                 self.after(0, lambda m=msg: self.label_status.configure(text=m, text_color="white"))
                 if acc:
-                    self.after(0, lambda t=acc: self._update_trans_result(t))
+                    self._schedule_trans_result_update(acc)
 
             def check_cancelled():
                 return self.is_cancelled
@@ -3092,7 +3101,7 @@ class CapCutTTSApp(ctk.CTk):
                 parsed_items = parse_srt(source_text)
                 if not parsed_items:
                     raise Exception("Không thể nhận diện các khối phụ đề SRT hợp lệ.")
-                
+
                 self.after(0, lambda n=len(parsed_items): self.label_status.configure(
                     text=f"Đã nhận diện {n} câu phụ đề SRT. Bắt đầu dịch đa luồng...",
                     text_color="white"
@@ -3126,12 +3135,30 @@ class CapCutTTSApp(ctk.CTk):
             self.after(0, lambda e=e: self.label_status.configure(text=f"Lỗi: {e}", text_color="red"))
             self.after(0, lambda e=e: messagebox.showerror("Lỗi dịch thuật", f"Có lỗi xảy ra trong quá trình dịch:\n{e}"))
         finally:
+            if translator:
+                translator.close()
             self.after(0, lambda: self.btn_start_trans.configure(state="normal", text="⚡ Bắt đầu Dịch"))
             self.after(0, lambda: self.btn_stop_trans.configure(state="disabled"))
+
+    def _schedule_trans_result_update(self, text):
+        """Throttle live UI updates to 5 times per second to prevent Tkinter freezing."""
+        self._pending_trans_result = text
+        if getattr(self, "_trans_update_scheduled", False):
+            return
+        self._trans_update_scheduled = True
+        self.after(200, self._flush_trans_result)
+
+    def _flush_trans_result(self):
+        self._trans_update_scheduled = False
+        text = getattr(self, "_pending_trans_result", None)
+        if text is not None:
+            self._update_trans_result(text)
+            self._pending_trans_result = None
 
     def _update_trans_result(self, text):
         self.trans_result_output.delete("1.0", "end")
         self.trans_result_output.insert("1.0", text)
+        self.trans_result_output.see("end")
 
     def download_trans_srt(self, mode="translated"):
         text = self.trans_result_output.get("1.0", "end-1c").strip()
@@ -3139,12 +3166,24 @@ class CapCutTTSApp(ctk.CTk):
             messagebox.showwarning("Cảnh báo", "Chưa có nội dung bản dịch để lưu!")
             return
 
-        if hasattr(self, "last_translated_srt_items") and self.last_translated_srt_items:
-            content = build_srt(self.last_translated_srt_items, mode=mode)
-        else:
-            if not is_srt_content(text):
+        if mode == "translated":
+            # If user edited text in output box and it's valid SRT, prioritize textbox content
+            if is_srt_content(text):
+                content = text
+            elif hasattr(self, "last_translated_srt_items") and self.last_translated_srt_items:
+                content = build_srt(self.last_translated_srt_items, mode="translated")
+            else:
                 messagebox.showwarning("Cảnh báo", "Bản dịch hiện tại không phải định dạng SRT. Vui lòng chọn 'Lưu TXT'!")
                 return
+        elif mode == "bilingual":
+            if hasattr(self, "last_translated_srt_items") and self.last_translated_srt_items:
+                content = build_srt(self.last_translated_srt_items, mode="bilingual")
+            elif is_srt_content(text):
+                content = text
+            else:
+                messagebox.showwarning("Cảnh báo", "Không đủ dữ liệu phụ đề song ngữ. Vui lòng chọn 'Lưu TXT'!")
+                return
+        else:
             content = text
 
         suffix = "_bilingual.srt" if mode == "bilingual" else "_vi.srt"

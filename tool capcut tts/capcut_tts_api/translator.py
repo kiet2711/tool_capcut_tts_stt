@@ -20,8 +20,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 try:
     import requests
+    from requests.adapters import HTTPAdapter
 except ImportError:
     requests = None
+    HTTPAdapter = None
 
 
 # Model display labels → actual Google API model IDs (identity — these ARE the real API names)
@@ -62,7 +64,7 @@ CONCURRENCY_OPTIONS = [
 def resolve_model_id(label_or_id: str) -> str:
     """Resolve user-selected label or raw model ID to an executable model name."""
     if not label_or_id:
-        return "gemini-2.5-flash"
+        return "gemini-3.5-flash-lite"
     if label_or_id in MODEL_MAP:
         return MODEL_MAP[label_or_id]
     for k, v in MODEL_MAP.items():
@@ -70,7 +72,9 @@ def resolve_model_id(label_or_id: str) -> str:
             return v
     # Extract clean model identifier before space or parenthesis
     clean = re.split(r"[\s\(]", label_or_id.strip())[0].strip()
-    return clean or "gemini-2.5-flash"
+    if clean == "gemini-2.5-flash":
+        return "gemini-3.6-flash"
+    return clean or "gemini-3.5-flash-lite"
 
 
 def parse_concurrency_val(val: Union[str, int], key_count: int = 1) -> int:
@@ -292,7 +296,7 @@ def get_chunk_config(model_id: str, trans_type: str = "srt") -> Dict[str, Any]:
         }
 
 
-def chunk_srt_items(items: List[SrtItem], model_id: str = "gemini-2.5-flash") -> Tuple[List[List[SrtItem]], Dict[str, Any]]:
+def chunk_srt_items(items: List[SrtItem], model_id: str = "gemini-3.5-flash-lite") -> Tuple[List[List[SrtItem]], Dict[str, Any]]:
     """Slice list of SRT items into batches according to model capability."""
     config = get_chunk_config(model_id, "srt")
     size = config["chunk_size"]
@@ -302,7 +306,7 @@ def chunk_srt_items(items: List[SrtItem], model_id: str = "gemini-2.5-flash") ->
     return chunks, config
 
 
-def chunk_raw_text(raw_text: str, model_id: str = "gemini-2.5-flash") -> Tuple[List[str], Dict[str, Any]]:
+def chunk_raw_text(raw_text: str, model_id: str = "gemini-3.5-flash-lite") -> Tuple[List[str], Dict[str, Any]]:
     """Smart chunking for novel / raw text by paragraphs and sentences."""
     config = get_chunk_config(model_id, "novel")
     limit = config["chunk_size"]
@@ -389,12 +393,14 @@ QUY TẮC BẮT BUỘC ĐỂ BẢN DỊCH KHÔNG BỊ THIẾU (CHỐNG TÓM TẮ
 class GeminiTranslator:
     """
     High-performance AI Translation Engine ported directly from truyen-ngan:
+    - Persistent HTTP connection pooling with requests.Session() (fast Keep-Alive)
     - Worker Pool architecture with dedicated worker IDs
-    - Multi-Key Round-Robin & Instant Key Failover upon 429/403/401 errors
+    - Multi-Key Round-Robin & Instant Key Failover upon 429/403/401/400 errors
     - Smart Chunking & Context Overlap
+    - Live SRT accumulation without un-translated source text flashing
     """
 
-    def __init__(self, api_keys: Union[str, List[str]], model: str = "gemini-2.5-flash"):
+    def __init__(self, api_keys: Union[str, List[str]], model: str = "gemini-3.5-flash-lite"):
         if isinstance(api_keys, str):
             keys = [k.strip() for k in re.split(r"[,;\n\r]+", api_keys) if k.strip()]
         else:
@@ -405,57 +411,65 @@ class GeminiTranslator:
         self.is_translating = False
         self.is_cancelled = False
 
+        # Connection pooling for high performance (equivalent to browser HTTP/2 multiplexing)
+        self.session = None
+        if requests is not None:
+            self.session = requests.Session()
+            if HTTPAdapter is not None:
+                adapter = HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=0)
+                self.session.mount("https://", adapter)
+                self.session.mount("http://", adapter)
+
+    def close(self):
+        """Close connection pool session."""
+        if self.session:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+
     def call_gemini_with_key(
         self,
         prompt: str,
         system_instruction: str,
         api_key: str,
         model: Optional[str] = None,
-        max_retries: int = 3,
+        timeout: int = 60,
     ) -> str:
         """
-        Call Gemini REST API — ported from truyen-ngan geminiService.callTranslateApiWithKey().
-        Retry with exponential backoff (2s → 8s max) on transient failures.
+        Call Gemini REST API with HTTP Keep-Alive connection reuse.
+        Fails fast on 429/403/400/401 to trigger instant key rotation in the worker.
         """
         if requests is None:
             raise RuntimeError("Thư viện 'requests' chưa được cài đặt. Vui lòng chạy 'pip install requests'.")
 
         effective_model = resolve_model_id(model or self.model)
-        delay = 2.0
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 8192,
+            },
+        }
+        if system_instruction:
+            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model}:generateContent?key={api_key}"
-                payload = {
-                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.2,
-                        "maxOutputTokens": 8192,
-                    },
-                }
-                if system_instruction:
-                    payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        http_client = self.session if self.session else requests
+        resp = http_client.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=timeout)
 
-                resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=90)
+        if resp.status_code != 200:
+            err_text = resp.text[:300]
+            err = RuntimeError(f"Gemini API Error {resp.status_code}: {err_text}")
+            err.status_code = resp.status_code
+            raise err
 
-                if resp.status_code != 200:
-                    err_text = resp.text[:300]
-                    err = RuntimeError(f"Gemini API Error {resp.status_code}: {err_text}")
-                    err.status_code = resp.status_code
-                    raise err
-
-                data = resp.json()
-                candidate = data.get("candidates", [{}])[0] if data.get("candidates") else {}
-                text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "") if candidate.get("content") else ""
-                if not text:
-                    raise ValueError("API không trả về nội dung dịch hợp lệ.")
-                return text.strip()
-
-            except Exception as error:
-                if attempt == max_retries:
-                    raise error
-                time.sleep(delay)
-                delay = min(delay * 1.5, 8.0)
+        data = resp.json()
+        candidate = data.get("candidates", [{}])[0] if data.get("candidates") else {}
+        text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "") if candidate.get("content") else ""
+        if not text:
+            raise ValueError("API không trả về nội dung dịch hợp lệ.")
+        return text.strip()
 
     def translate_srt(
         self,
@@ -466,7 +480,7 @@ class GeminiTranslator:
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[SrtItem]:
         """
-        Translate SRT subtitles with Worker Pool & Multi-Key Failover.
+        Translate SRT subtitles with Worker Pool & Multi-Key Instant Failover.
         """
         if not self.api_keys:
             raise ValueError("Chưa có Gemini API Key. Vui lòng nhập ít nhất 1 Key!")
@@ -490,7 +504,6 @@ class GeminiTranslator:
         system_prompt = get_translation_system_prompt(style, "srt")
 
         completed_chunks = 0
-        translated_so_far = []
         next_chunk_index = 0
         lock = threading.Lock()
 
@@ -521,30 +534,33 @@ class GeminiTranslator:
                 current_key = self.api_keys[key_index]
 
                 chunk_srt_text = build_srt(chunk_items, mode="source")
+
+                # Context Overlap aligned 100% with truyen-ngan
                 context_prefix = ""
                 if prev_chunk_items and len(prev_chunk_items) > 0:
-                    prev_samples = [it.original_text for it in prev_chunk_items[-6:] if it.original_text]
-                    if prev_samples:
-                        context_prefix = f'[BỐI CẢNH 5-6 CÂU LIỀN TRƯỚC ĐỂ THAM KHẢO - TUYỆT ĐỐI KHÔNG DỊCH LẠI]:\n"{", ".join(prev_samples)}"\n\n'
+                    overlap_items = prev_chunk_items[-3:]
+                    overlap_lines = "\n".join([f"{it.timecode}: {it.original_text}" for it in overlap_items if it.original_text])
+                    if overlap_lines:
+                        context_prefix = f"[BỐI CẢNH 3 CÂU LIỀN TRƯỚC ĐỂ BẠN NẮM VỮNG ĐẠI TỪ XƯNG HÔ VÀ MẠCH CẢM XÚC - TUYỆT ĐỐI KHÔNG DỊCH LẠI CÁC CÂU NÀY]:\n{overlap_lines}\n\n"
 
-                prompt = f"{context_prefix}Hãy dịch chính xác 100% toàn bộ file phụ đề SRT sau sang tiếng Việt chuẩn và tự nhiên (TUYỆT ĐỐI BẢO TOÀN TIME-CODE VÀ ID):\n\n{chunk_srt_text}"
+                prompt = f"{context_prefix}[NỘI DUNG BẮT BUỘC DỊCH SANG TIẾNG VIỆT ĐẦY ĐỦ 100% CÁC KHỐI PHỤ ĐỀ DƯỚI ĐÂY]:\n\n{chunk_srt_text}"
 
                 if progress_callback:
                     with lock:
-                        pct = int((completed_chunks / total_chunks) * 100)
-                        msg = f"[Luồng #{worker_id + 1}] Đang dịch đoạn {chunk_index + 1}/{total_chunks}..." if num_workers > 1 else f"Đang dịch đoạn {chunk_index + 1}/{total_chunks}..."
+                        pct = completed_chunks / total_chunks
+                        msg = f"[Luồng #{worker_id + 1}] Đang dịch phần {chunk_index + 1}/{total_chunks} ({len(chunk_items)} dòng)..." if num_workers > 1 else f"Đang dịch phần {chunk_index + 1}/{total_chunks}..."
                         progress_callback({
                             "status": "translating",
                             "worker_id": worker_id + 1,
                             "completed": completed_chunks,
                             "total": total_chunks,
-                            "progress": completed_chunks / total_chunks,
+                            "progress": pct,
                             "message": msg,
                         })
 
                 success = False
                 retry_attempts = 0
-                max_retries = max(3, len(self.api_keys))
+                max_retries = max(3, min(len(self.api_keys), 6))
 
                 while not success and retry_attempts < max_retries and not self.is_cancelled and (not cancel_check or not cancel_check()):
                     try:
@@ -556,7 +572,7 @@ class GeminiTranslator:
                         )
                         parsed_trans = parse_srt(trans_text)
 
-                        # Match translations by index or timecode
+                        # Match translations by id, timecode, or sequential position
                         for local_idx, item in enumerate(chunk_items):
                             matched = None
                             for pt in parsed_trans:
@@ -573,16 +589,17 @@ class GeminiTranslator:
 
                             if matched and matched.original_text:
                                 item.translated_text = matched.original_text
-                            elif not item.translated_text:
-                                item.translated_text = item.original_text
+                            elif matched and matched.translated_text:
+                                item.translated_text = matched.translated_text
 
                         with lock:
                             completed_chunks += 1
-                            translated_so_far.extend(chunk_items)
                             success = True
                             if progress_callback:
                                 pct = completed_chunks / total_chunks
-                                cur_full_srt = build_srt(items, mode="translated")
+                                # Only output items that are translated so far (matches truyen-ngan, prevents Chinese flash)
+                                translated_so_far = [it for it in items if it.translated_text]
+                                cur_full_srt = build_srt(translated_so_far, mode="translated")
                                 progress_callback({
                                     "status": "chunk_completed",
                                     "worker_id": worker_id + 1,
@@ -590,24 +607,23 @@ class GeminiTranslator:
                                     "total": total_chunks,
                                     "progress": pct,
                                     "accumulated_text": cur_full_srt,
-                                    "message": f"[Đa luồng x{num_workers}] Đã xong {completed_chunks}/{total_chunks} đoạn ({int(pct * 100)}%)!",
+                                    "message": f"[Đa luồng x{num_workers}] Đã xong {completed_chunks}/{total_chunks} phần ({len(translated_so_far)}/{len(items)} dòng)!",
                                 })
 
                         if config["delay_ms"] > 0 and next_chunk_index < len(tasks):
-                            time.sleep(max(0.3, config["delay_ms"] / 1000.0 / (num_workers if num_workers > 1 else 1.0)))
+                            time.sleep(max(0.1, config["delay_ms"] / 1000.0 / (num_workers if num_workers > 1 else 1.0)))
 
                     except Exception as err:
                         retry_attempts += 1
-                        err_str = str(err).lower()
-                        # Rotate to next API Key if quota/rate-limit/permission error
+                        # Instant Key Failover: switch to next key immediately without long sleep
                         if len(self.api_keys) > 1:
                             key_index = (key_index + 1) % len(self.api_keys)
                             current_key = self.api_keys[key_index]
 
                         if retry_attempts >= max_retries:
-                            raise RuntimeError(f"Luồng #{worker_id + 1} không thể dịch đoạn {chunk_index + 1}: {err}")
+                            raise RuntimeError(f"Luồng #{worker_id + 1} không thể dịch phần {chunk_index + 1}: {err}")
 
-                        time.sleep(1.5)
+                        time.sleep(0.5)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(run_worker, w) for w in range(num_workers)]
@@ -630,7 +646,7 @@ class GeminiTranslator:
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> str:
         """
-        Translate long novel / raw text with Worker Pool & Multi-Key Failover.
+        Translate long novel / raw text with Worker Pool & Multi-Key Instant Failover.
         """
         if not self.api_keys:
             raise ValueError("Chưa có Gemini API Key. Vui lòng nhập ít nhất 1 Key!")
@@ -692,20 +708,20 @@ class GeminiTranslator:
 
                 if progress_callback:
                     with lock:
-                        pct = int((completed_chunks / total_chunks) * 100)
+                        pct = completed_chunks / total_chunks
                         msg = f"[Luồng #{worker_id + 1}] Đang dịch đoạn {chunk_index + 1}/{total_chunks}..." if num_workers > 1 else f"Đang dịch đoạn {chunk_index + 1}/{total_chunks}..."
                         progress_callback({
                             "status": "translating",
                             "worker_id": worker_id + 1,
                             "completed": completed_chunks,
                             "total": total_chunks,
-                            "progress": completed_chunks / total_chunks,
+                            "progress": pct,
                             "message": msg,
                         })
 
                 success = False
                 retry_attempts = 0
-                max_retries = max(3, len(self.api_keys))
+                max_retries = max(3, min(len(self.api_keys), 6))
 
                 while not success and retry_attempts < max_retries and not self.is_cancelled and (not cancel_check or not cancel_check()):
                     try:
@@ -733,7 +749,7 @@ class GeminiTranslator:
                                 })
 
                         if config["delay_ms"] > 0 and next_chunk_index < len(tasks):
-                            time.sleep(max(0.3, config["delay_ms"] / 1000.0 / (num_workers if num_workers > 1 else 1.0)))
+                            time.sleep(max(0.1, config["delay_ms"] / 1000.0 / (num_workers if num_workers > 1 else 1.0)))
 
                     except Exception as err:
                         retry_attempts += 1
@@ -744,7 +760,7 @@ class GeminiTranslator:
                         if retry_attempts >= max_retries:
                             raise RuntimeError(f"Luồng #{worker_id + 1} không thể dịch đoạn {chunk_index + 1}: {err}")
 
-                        time.sleep(1.5)
+                        time.sleep(0.5)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(run_worker, w) for w in range(num_workers)]
