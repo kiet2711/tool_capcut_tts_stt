@@ -781,15 +781,22 @@ class CapCutVocalSeparator:
             )
 
             # Polling task result
-            timeout = 300.0
+            timeout = 600.0
             start_t = time.time()
             download_url = None
+            poll_interval = 2.0
 
             while time.time() - start_t < timeout:
                 if cancel_check and cancel_check():
                     raise CapCutError("Đã huỷ bởi người dùng.")
 
-                q_res = self.query_vocal_task(task_id, token, bind_id)
+                try:
+                    q_res = self.query_vocal_task(task_id, token, bind_id)
+                except Exception:
+                    # Temporary network glitch, backoff and retry
+                    time.sleep(3.0)
+                    continue
+
                 tasks = (q_res.get("data") or {}).get("tasks") or []
                 if tasks:
                     t_item = tasks[0]
@@ -838,8 +845,12 @@ class CapCutVocalSeparator:
                         )
                         code_str = f" (Mã {err_code})" if err_code is not None else ""
                         raise CapCutTaskError(f"Tác vụ tách {stem_label} thất bại{code_str}: {err_msg}")
+                    poll_interval = 2.0
+                else:
+                    # Rate-limited or empty data, backoff slightly
+                    poll_interval = 3.5
 
-                time.sleep(2.0)
+                time.sleep(poll_interval)
 
             if not download_url:
                 raise CapCutTaskError(f"Quá thời gian chờ phản hồi tách {stem_label} từ máy chủ CapCut.")
@@ -909,6 +920,17 @@ class CapCutVocalSeparator:
 
         slice_ext = "mp3" if out_format.lower() == "mp3" else "wav"
 
+        full_audio_file = None
+        if num_chunks > 1:
+            report(3.0, "Đang trích xuất luồng âm thanh gốc để tối ưu tốc độ phân đoạn...")
+            cand_audio = str(Path(work_dir) / f"full_source.{slice_ext}")
+            try:
+                extract_audio_slice(input_p, 0, total_duration, cand_audio, audio_format=slice_ext)
+                if os.path.exists(cand_audio) and os.path.getsize(cand_audio) > 0:
+                    full_audio_file = cand_audio
+            except Exception:
+                full_audio_file = None
+
         try:
             chunks_info = []
             for idx in range(num_chunks):
@@ -922,7 +944,7 @@ class CapCutVocalSeparator:
                     "chunk_file": chunk_file,
                 })
 
-            active_workers = min(max(int(concurrency), 1), num_chunks)
+            active_workers = min(max(int(concurrency), 1), num_chunks, 10)
             completed_count = 0
             lock = threading.Lock()
 
@@ -939,24 +961,25 @@ class CapCutVocalSeparator:
                 if cancel_check and cancel_check():
                     raise CapCutError("Đã huỷ bởi người dùng.")
 
-                # 1. Trích xuất lát cắt âm thanh bằng FFmpeg
-                extract_audio_slice(input_p, start_sec, dur_sec, chunk_file, audio_format=slice_ext)
+                # 1. Trích xuất lát cắt âm thanh (từ file âm thanh tổng nếu có để siêu tốc và không nghẽn ổ đĩa)
+                source_for_slice = full_audio_file if (full_audio_file and os.path.exists(full_audio_file)) else input_p
+                extract_audio_slice(source_for_slice, start_sec, dur_sec, chunk_file, audio_format=slice_ext)
 
                 if cancel_check and cancel_check():
                     raise CapCutError("Đã huỷ bởi người dùng.")
 
                 # 2. Xử lý qua CapCut Cloud API bằng worker separator độc lập
-                # Mỗi luồng tạo một DeviceConfig ngẫu nhiên riêng biệt để tránh bị CapCut xếp hàng chờ theo thiết bị
-                worker_device = DeviceConfig()
-                worker_device.randomize()
-                worker_client = CapCutClient(device=worker_device)
-                worker_separator = CapCutVocalSeparator(cookie=self.cookie, client=worker_client)
-
+                # Thử lại tối đa 3 lần, mỗi lần tạo DeviceConfig ngẫu nhiên mới để không bị xếp hàng
                 last_err = None
-                for attempt in range(2):
+                for attempt in range(3):
                     if cancel_check and cancel_check():
                         raise CapCutError("Đã huỷ bởi người dùng.")
                     try:
+                        worker_device = DeviceConfig()
+                        worker_device.randomize()
+                        worker_client = CapCutClient(device=worker_device)
+                        worker_separator = CapCutVocalSeparator(cookie=self.cookie, client=worker_client)
+
                         res_stems = worker_separator.process_single_chunk(
                             chunk_wav_path=chunk_file,
                             duration_sec=dur_sec,
@@ -982,7 +1005,7 @@ class CapCutVocalSeparator:
                         last_err = e
                         if cancel_check and cancel_check():
                             raise CapCutError("Đã huỷ bởi người dùng.")
-                        time.sleep(1.5)
+                        time.sleep(2.0 * (attempt + 1))
 
                 if last_err:
                     raise CapCutError(f"Lỗi xử lý phân đoạn {idx+1}/{num_chunks}: {last_err}")

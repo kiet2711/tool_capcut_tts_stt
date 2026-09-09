@@ -2,6 +2,69 @@
   {
     "lan": "vi",
     "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_female_yuenan1",
+    "display_name": "Chị Dịu Dàng",
+    "resource_id": "7675984617253375253"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_female_yuenan4",
+    "display_name": "Nàng Điềm Tĩnh",
+    "resource_id": "7675974812837219592"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_female_yuenan3",
+    "display_name": "Em Gái Ngọt Ngào",
+    "resource_id": "7675982579366956308"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "multi_female_partner_uranus_bigtts",
+    "display_name": "Quản lý vững vàng",
+    "resource_id": "7654501692376993040"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_male_xinluyin",
+    "display_name": "Người Kể Điềm Tĩnh",
+    "resource_id": "7668606732947574036"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_female_qcns",
+    "display_name": "Nàng Tươi Tắn",
+    "resource_id": "7673047160434330900"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_female_housangnvsheng",
+    "display_name": "Thiếu nữ dịu dàng",
+    "resource_id": "7659674297782258965"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_female_xfns",
+    "display_name": "Cô Gái Năng Động",
+    "resource_id": "7673039258290081045"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
+    "voice_type": "ICL_uranus_vi_male_cfzc",
+    "display_name": "Chàng Trai Ấm Áp",
+    "resource_id": "7673075012848405761"
+  },
+  {
+    "lan": "vi",
+    "lang": "vi-VN",
     "voice_type": "BV421_vivn_streaming",
     "display_name": "Nhỏ Ngọt Ngào",
     "resource_id": "7252594014782755330",

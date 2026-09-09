@@ -34,7 +34,9 @@ MODEL_MAP = {
     "gemma-4-31b-it (14.400 RPD - Băm nhỏ an toàn 16k TPM)": "gemma-4-31b-it",
     "gemma-4-26b-a4b-it (14.400 RPD MoE - Tốc độ cao)": "gemma-4-26b-a4b-it",
     "gemini-3.7-flash (Thế hệ 3.7 - 20 RPD)": "gemini-3.7-flash",
-    "gemini-2.5-flash-lite (10 RPM / 20 RPD)": "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite (15 RPM / 500 RPD)": "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite (Hạn mức cao: 15 RPM / 500 RPD / 250k TPM)": "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite": "gemini-3.1-flash-lite",
 }
 
 STYLE_PRESETS = {
@@ -74,6 +76,8 @@ def resolve_model_id(label_or_id: str) -> str:
     clean = re.split(r"[\s\(]", label_or_id.strip())[0].strip()
     if clean == "gemini-2.5-flash":
         return "gemini-3.6-flash"
+    if clean == "gemini-2.5-flash-lite":
+        return "gemini-3.1-flash-lite"
     return clean or "gemini-3.5-flash-lite"
 
 
@@ -320,7 +324,7 @@ def count_units(text: str) -> int:
 def get_chunk_config(model_id: str, trans_type: str = "srt") -> Dict[str, Any]:
     """
     Get chunk size and rate-limit delay based on model architecture:
-    - Gemini (Flash 3.5 / 3.6 / 2.5 / 2.0): Gộp chunk lớn (80 dòng SRT / 1.800 từ) để tối thiểu request.
+    - Gemini (Flash 3.5 / 3.6 / 3.1 / 3.7): Gộp chunk lớn (80 dòng SRT / 1.800 từ) để tối thiểu request.
     - Gemma (4 31B / 26B): Băm nhỏ an toàn (40 dòng SRT / 700 từ) để an toàn 16k TPM.
     """
     is_gemma = bool(model_id and "gemma" in model_id.lower())
@@ -399,22 +403,27 @@ def get_translation_system_prompt(user_custom_style: str = "", trans_type: str =
     # Resolve preset style if user selected standard name
     style_text = STYLE_PRESETS.get(user_custom_style, user_custom_style).strip()
 
+    name_and_language_rules = """QUY TẮC BẮT BUỘC VỀ TÊN NHÂN VẬT & TỪ NGỮ (CHỐNG LỖI NỬA VIỆT NỬA HÁN):
+1. PHIÊN ÂM 100% SANG HÁN VIỆT: Toàn bộ họ tên nhân vật, tên riêng, biệt danh, địa danh, chức vụ, danh xưng BẮT BUỘC phải chuyển sang âm Hán Việt chuẩn mực hoàn chỉnh (Ví dụ: 余昭昭 -> Dư Chiêu Chiêu, 祝清梨 -> Chúc Thanh Lê, 沈砚白 -> Thẩm Nghiễn Bạch, 顾总 -> Cố tổng, 陆爷 -> Lục gia, 林浅 -> Lâm Thiển, 苏小姐 -> Tô tiểu thư, 李特助 -> trợ lý Lý/đặc trợ Lý...).
+2. TUYỆT ĐỐI KHÔNG DỊCH NỬA VỜI: Nghiêm cấm tuyệt đối việc dịch một nửa tiếng Việt một nửa để lại chữ Hán (CẤM các dạng như 'Dư 昭昭', 'Chúc 清梨', 'Thẩm 砚白', 'Cố 总', 'Lục 爷'...).
+3. 100% TIẾNG VIỆT THUẦN TÚY: Tuyệt đối không để sót bất kỳ ký tự chữ Hán (Chinese Hanzi) nào trong kết quả dịch. Toàn bộ chữ Hán đều phải được dịch nghĩa hoặc phiên âm Hán Việt tương ứng."""
+
     if style_text:
         style_guide = f"""PHONG CÁCH DỊCH THEO YÊU CẦU CỦA NGƯỜI DÙNG:
 "{style_text}"
 - Hãy bám sát và tuân thủ tuyệt đối phong cách dịch, giọng văn và yêu cầu trên.
-- Dịch thoát nghĩa, trôi chảy, đúng sắc thái nhân vật và ngữ cảnh của câu chuyện.
-- Sử dụng tên nhân vật và danh xưng theo âm Hán Việt chuẩn mực và trang trọng."""
+- Dịch thoát nghĩa, trôi chảy, đúng sắc thái nhân vật và ngữ cảnh của câu chuyện."""
     else:
         style_guide = """TỰ ĐỘNG SUY LUẬN NGỮ CẢNH & THỂ LOẠI (AUTO-INFERENCE):
-- Hãy đọc kỹ văn bản gốc để tự động nhận diện thể loại (phim ngắn Zhihu vả mặt, hiện đại đô thị, cổ trang tiên hiệp, hào môn thế gia, hài hước, kinh dị...).
+- Hãy đọc kỹ văn bản gốc để tự động nhận diện thể loại (phim ngắn Zhihu vả mặt, hiện đại đô thị, cổ trang tiên hiệp, hào môn thế gia, hài hước, ngôn tình...).
 - Tự động điều chỉnh giọng văn cho phù hợp nhất: kịch tính dồn dập cho phim ngắn, mềm mại giàu cảm xúc cho ngôn tình, trang trọng khí thế cho tiên hiệp/cổ trang.
-- Dịch thoát nghĩa, tự nhiên, thuần Việt, tuyệt đối không dịch thô kiểu "word-by-word" máy móc.
-- Giữ nguyên các tên riêng, địa danh và danh xưng nhân vật theo âm Hán Việt chuẩn mực (Cố tổng, Lục gia, Thẩm tiểu thư...)."""
+- Dịch thoát nghĩa, tự nhiên, thuần Việt, tuyệt đối không dịch thô kiểu "word-by-word" máy móc."""
 
     if trans_type == "srt":
         return f"""Bạn là chuyên gia dịch phụ đề video và phim ngắn Trung - Việt hàng đầu thế giới.
 {style_guide}
+
+{name_and_language_rules}
 
 QUY TẮC BẮT BUỘC ĐỂ KHÔNG BỊ DỊCH THIẾU HOẶC MẤT DÒNG PHỤ ĐỀ:
 1. TUYỆT ĐỐI BẢO TOÀN 100% CẤU TRÚC SRT: Đầu vào có bao nhiêu khối phụ đề (ID từ 1 đến N) thì đầu ra BẮT BUỘC PHẢI CÓ ĐỦ CHÍNH XÁC bấy nhiêu khối phụ đề.
@@ -424,6 +433,8 @@ QUY TẮC BẮT BUỘC ĐỂ KHÔNG BỊ DỊCH THIẾU HOẶC MẤT DÒNG PHỤ
 
     return f"""Bạn là chuyên gia dịch thuật văn học và tiểu thuyết Trung - Việt hàng đầu thế giới.
 {style_guide}
+
+{name_and_language_rules}
 
 QUY TẮC BẮT BUỘC ĐỂ BẢN DỊCH KHÔNG BỊ THIẾU (CHỐNG TÓM TẮT):
 1. DỊCH ĐẦY ĐỦ 100% TOÀN BỘ VĂN BẢN: Bắt buộc dịch trọn vẹn từng câu, từng đoạn từ đầu đến cuối. Tuyệt đối KHÔNG ĐƯỢC TÓM TẮT, KHÔNG ĐƯỢC CẮT BỚT, KHÔNG ĐƯỢC BỎ SÓT bất kỳ câu văn, lời thoại hay đoạn miêu tả nào dù là nhỏ nhất.
@@ -602,7 +613,7 @@ class GeminiTranslator:
                     if overlap_lines:
                         context_prefix = f"[BỐI CẢNH 3 CÂU LIỀN TRƯỚC ĐỂ BẠN NẮM VỮNG ĐẠI TỪ XƯNG HÔ VÀ MẠCH CẢM XÚC - TUYỆT ĐỐI KHÔNG DỊCH LẠI CÁC CÂU NÀY]:\n{overlap_lines}\n\n"
 
-                prompt = f"{context_prefix}[NỘI DUNG BẮT BUỘC DỊCH SANG TIẾNG VIỆT ĐẦY ĐỦ 100% CÁC KHỐI PHỤ ĐỀ DƯỚI ĐÂY]:\n\n{chunk_srt_text}"
+                prompt = f"{context_prefix}[NỘI DUNG BẮT BUỘC DỊCH SANG TIẾNG VIỆT 100% CÁC KHỐI PHỤ ĐỀ DƯỚI ĐÂY (PHIÊN ÂM TẤT CẢ HỌ TÊN NHÂN VẬT SANG HÁN VIỆT HOÀN TOÀN, TUYỆT ĐỐI KHÔNG ĐỂ SÓT CHỮ HÁN)]:\n\n{chunk_srt_text}"
 
                 if progress_callback:
                     with lock:
@@ -815,7 +826,7 @@ class GeminiTranslator:
                     if last_sentences:
                         context_prefix = f'[BỐI CẢNH ĐOẠN LIỀN TRƯỚC ĐỂ THAM KHẢO MẠCH TRUYỆN - TUYỆT ĐỐI KHÔNG DỊCH LẠI]:\n"{last_sentences}"\n\n'
 
-                prompt = f"{context_prefix}Dịch ĐẦY ĐỦ 100% toàn bộ văn bản tiểu thuyết sau đây sang tiếng Việt (TUYỆT ĐỐI KHÔNG TÓM TẮT, KHÔNG CẮT BỚT BẤT KỲ CÂU NÀO):\n\n{chunk_text}"
+                prompt = f"{context_prefix}Dịch ĐẦY ĐỦ 100% toàn bộ văn bản tiểu thuyết sau đây sang tiếng Việt (TUYỆT ĐỐI KHÔNG TÓM TẮT, KHÔNG CẮT BỚT BẤT KỲ CÂU NÀO, PHIÊN ÂM TẤT CẢ HỌ TÊN NHÂN VẬT SANG HÁN VIỆT HOÀN TOÀN, TUYỆT ĐỐI KHÔNG ĐỂ SÓT CHỮ HÁN):\n\n{chunk_text}"
 
                 if progress_callback:
                     with lock:

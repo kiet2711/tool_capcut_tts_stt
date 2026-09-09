@@ -991,7 +991,7 @@ class CapCutTTSApp(ctk.CTk):
                 "gemma-4-31b-it (14.400 RPD - Băm nhỏ an toàn 16k TPM)",
                 "gemma-4-26b-a4b-it (14.400 RPD MoE - Tốc độ cao)",
                 "gemini-3.7-flash (Thế hệ 3.7 - 20 RPD)",
-                "gemini-2.5-flash-lite (10 RPM / 20 RPD)"
+                "gemini-3.1-flash-lite (15 RPM / 500 RPD)"
             ],
             variable=self.trans_model_var,
             width=330
@@ -1296,8 +1296,8 @@ class CapCutTTSApp(ctk.CTk):
         self.slider_threads_vocal = ctk.CTkSlider(
             self.frame_vocal_threads,
             from_=1,
-            to=100,
-            number_of_steps=99,
+            to=10,
+            number_of_steps=9,
             command=self.update_threads_vocal_label,
             width=140,
         )
@@ -1314,7 +1314,7 @@ class CapCutTTSApp(ctk.CTk):
 
         ctk.CTkLabel(
             self.frame_vocal_options,
-            text="💡 Tối ưu video dài (1-2 tiếng): Tách nhiều đoạn cùng lúc, tốc độ tăng gấp nhiều lần.",
+            text="💡 Khuyên dùng 3-5 luồng để đạt tốc độ cao nhất và không bị máy chủ CapCut xếp hàng chờ.",
             font=ctk.CTkFont(size=11),
             text_color="gray",
         ).grid(row=2, column=2, columnspan=2, padx=(15, 5), pady=(0, 8), sticky="w")
@@ -1722,7 +1722,7 @@ class CapCutTTSApp(ctk.CTk):
                         self.label_threads_stt_val.configure(text=f"{config['threads_stt']}")
 
                     if "threads_vocal" in config and hasattr(self, "slider_threads_vocal"):
-                        val_vocal = min(100, max(1, int(config["threads_vocal"])))
+                        val_vocal = min(10, max(1, int(config["threads_vocal"])))
                         self.slider_threads_vocal.set(val_vocal)
                         self.label_threads_vocal_val.configure(text=f"{val_vocal} luồng")
 
@@ -1732,7 +1732,10 @@ class CapCutTTSApp(ctk.CTk):
                     if "trans_api_keys" in config and hasattr(self, "trans_api_key_var"):
                         self.trans_api_key_var.set(config["trans_api_keys"])
                     if "trans_model" in config and hasattr(self, "trans_model_var"):
-                        self.trans_model_var.set(config["trans_model"])
+                        saved_model = config["trans_model"]
+                        if "2.5-flash-lite" in saved_model:
+                            saved_model = "gemini-3.1-flash-lite (15 RPM / 500 RPD)"
+                        self.trans_model_var.set(saved_model)
                     if "trans_style" in config and hasattr(self, "trans_style_var"):
                         self.trans_style_var.set(config["trans_style"])
                     if "trans_concurrency" in config and hasattr(self, "trans_concurrency_var"):
